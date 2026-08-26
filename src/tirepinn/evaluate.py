@@ -1,19 +1,19 @@
-"""Evaluacion cuantitativa: precision, acierto en el cliff y coherencia fisica.
+"""Quantitative evaluation: accuracy, cliff timing and physical consistency.
 
-Las tres dimensiones responden a preguntas distintas:
+The three dimensions answer different questions:
 
-- **RMSE / MAE** sobre la perdida de ritmo: cuanto se equivoca el modelo en la
-  vuelta que esta viendo. Es la metrica que pide el criterio de precision
-  predictiva del proyecto.
+- **RMSE / MAE** on pace loss: how wrong the model is about the lap it is
+  currently looking at. This is the predictive-accuracy criterion the project
+  asks for.
 
-- **Error de vuelta del cliff**: cuanto se equivoca en la unica prediccion que
-  cambia una decision de estrategia. Un modelo puede tener buen RMSE global y
-  aun asi fallar el cliff por cinco vueltas, que es lo unico que importa.
+- **Cliff lap error**: how wrong it is about the one prediction that changes a
+  strategy decision. A model can have a good global RMSE and still miss the
+  cliff by five laps, which is the only thing that matters.
 
-- **Violaciones de monotonia**: con que frecuencia el modelo predice que el
-  neumatico recupera agarre. Es fisicamente imposible y ninguna metrica de
-  error la penaliza, asi que se mide aparte. Es la comparacion que justifica
-  meter la fisica dentro de la red.
+- **Monotonicity violations**: how often the model predicts the tire regaining
+  grip. That is physically impossible and no error metric penalises it, so it is
+  measured separately. It is the comparison that justifies putting physics
+  inside the network.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from .physics import cliff_lap
 
 @dataclass
 class Metrics:
-    """Resultado de evaluar un modelo sobre un conjunto de stints."""
+    """Result of evaluating one model over a set of stints."""
 
     name: str
     rmse: float
@@ -44,7 +44,7 @@ class Metrics:
     per_stint: dict[str, float] = field(default_factory=dict)
 
     def as_row(self) -> str:
-        cliff = "n/d" if self.cliff_mae is None else f"{self.cliff_mae:.2f}"
+        cliff = "n/a" if self.cliff_mae is None else f"{self.cliff_mae:.2f}"
         return (
             f"{self.name:22s} {self.rmse:7.3f} {self.mae:7.3f} {self.max_error:8.3f} "
             f"{cliff:>8s} {self.cliff_detected:3d}/{self.cliff_total:<3d} "
@@ -53,16 +53,16 @@ class Metrics:
 
 
 HEADER = (
-    f"{'Modelo':22s} {'RMSE':>7s} {'MAE':>7s} {'MaxErr':>8s} "
+    f"{'Model':22s} {'RMSE':>7s} {'MAE':>7s} {'MaxErr':>8s} "
     f"{'CliffMAE':>8s} {'Cliff':>7s} {'ViolIn':>8s} {'ViolExtrap':>10s}"
 )
 
 
 def _monotonicity_violation(delta: np.ndarray, tol: float = 1e-3) -> tuple[int, int]:
-    """Cuenta pasos vuelta a vuelta en los que el ritmo *mejora* mas de `tol`.
+    """Count lap-to-lap steps where pace *improves* by more than `tol`.
 
-    El neumatico solo se degrada: cualquier mejora sostenida es una prediccion
-    termodinamicamente imposible.
+    A tire only degrades: any sustained improvement is a thermodynamically
+    impossible prediction.
     """
     if delta.size < 2:
         return 0, 0
@@ -71,11 +71,11 @@ def _monotonicity_violation(delta: np.ndarray, tol: float = 1e-3) -> tuple[int, 
 
 
 def _true_cliff(stint: Stint, phys: PhysicsConfig) -> float | None:
-    """Vuelta del cliff de referencia.
+    """Reference cliff lap.
 
-    Siempre el mismo criterio que se aplica a las predicciones: pendiente de la
-    curva de ritmo. Con datos sinteticos se usa la curva sin ruido, que existe;
-    con datos reales, la medida, que es lo unico observable.
+    Always the same criterion applied to predictions: the slope of the pace
+    curve. With synthetic data the noise-free curve is used, since it exists;
+    with real data the measured one, which is all that is observable.
     """
     curve = stint.delta_true if stint.delta_true is not None else stint.delta
     return cliff_lap(stint.laps, curve, phys)
@@ -88,7 +88,7 @@ def evaluate(
     phys: PhysicsConfig,
     extrapolation_horizon: int | None = None,
 ) -> Metrics:
-    """Mide un modelo cualquiera que exponga `predict_stint(context, laps)`."""
+    """Measure any model exposing `predict_stint(context, laps)`."""
     extrapolation_horizon = extrapolation_horizon or phys.strategy_horizon
     errors: list[np.ndarray] = []
     cliff_errors: list[float] = []
@@ -108,8 +108,8 @@ def evaluate(
         viol += v
         viol_total += t
 
-        # Extrapolacion: se pide al modelo el stint completo hasta el horizonte,
-        # mas alla de lo que vio. Aqui es donde la fisica se nota.
+        # Extrapolation: the model is asked for the full stint out to the
+        # horizon, beyond what it saw. This is where physics shows.
         horizon = np.arange(1, extrapolation_horizon + 1)
         pred_long = np.asarray(predict_stint(stint.context, horizon), dtype=float).ravel()
         v, t = _monotonicity_violation(pred_long)
@@ -140,11 +140,13 @@ def evaluate(
     )
 
 
-def parameter_recovery(learned, truth, names: tuple[str, ...]) -> list[tuple[str, float, float, float]]:
-    """Compara parametros estimados contra la verdad sintetica.
+def parameter_recovery(
+    learned, truth, names: tuple[str, ...]
+) -> list[tuple[str, float, float, float]]:
+    """Compare estimated parameters against the synthetic ground truth.
 
-    Devuelve (nombre, estimado, verdadero, error relativo en %). Solo tiene
-    sentido con el banco sintetico: con datos reales no existe la verdad.
+    Returns (name, estimated, true, relative error in %). This only makes sense
+    on the synthetic bench: with real data there is no ground truth.
     """
     rows = []
     for n in names:
@@ -160,8 +162,8 @@ def format_report(metrics: list[Metrics]) -> str:
     lines.extend(m.as_row() for m in metrics)
     lines.append("")
     lines.append(
-        "ViolIn / ViolExtrap = % de vueltas en las que el modelo predice que el "
-        "neumatico recupera agarre,\ndentro del stint observado y extrapolando "
-        "al horizonte completo. Lo fisicamente correcto es 0%."
+        "ViolIn / ViolExtrap = % of laps where the model predicts the tire regaining "
+        "grip,\nwithin the observed stint and extrapolating to the full horizon. "
+        "The physically correct value is 0%."
     )
     return "\n".join(lines)

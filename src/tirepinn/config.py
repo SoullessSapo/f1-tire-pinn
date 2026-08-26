@@ -1,7 +1,7 @@
-"""Configuracion central del proyecto.
+"""Central configuration.
 
-Todos los hiperparametros (fisicos, de red y de datos) viven aqui para que los
-experimentos sean reproducibles y el reporte pueda citar valores concretos.
+Every hyperparameter (physical, network and data) lives here so experiments are
+reproducible and the report can quote concrete values.
 """
 
 from __future__ import annotations
@@ -10,38 +10,38 @@ import json
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 
-# Orden canonico del vector de entrada de la red: (tau, contexto...)
+# Canonical order of the network input vector: (tau, context...)
 CONTEXT_NAMES = ("q_fric", "load", "speed", "track_temp", "compound")
 INPUT_NAMES = ("tau", *CONTEXT_NAMES)
 INPUT_DIM = len(INPUT_NAMES)
 OUTPUT_NAMES = ("theta", "d")
 OUTPUT_DIM = len(OUTPUT_NAMES)
 
-# Parametros fisicos que la red puede estimar como problema inverso.
+# Physical parameters the network can estimate as an inverse problem.
 LEARNABLE_PARAMS = ("zeta", "h0", "h1", "kw", "m", "Ea", "kappa", "gamma1", "gamma2")
 
-# Subconjunto que se estima cuando se entrena con telemetria real. El resto se
-# fija a los valores calibrados en el banco fisico.
+# Subset estimated when training on real telemetry. The rest stay pinned at the
+# values calibrated on the physics bench.
 #
-# La razon es de identificabilidad, no de comodidad. Una carrera aporta unas
-# decenas de stints con un suelo de ruido de ~0.5 s por vuelta y poca variacion
-# de condiciones, que no alcanza para separar nueve coeficientes: al intentarlo,
-# los exponentes termicos colapsan a cero.
+# The reason is identifiability, not convenience. One race yields a few dozen
+# stints with a ~0.5 s per lap noise floor and very little variation in
+# conditions, which is not enough to separate nine coefficients: attempting it
+# makes the thermal exponents collapse to zero.
 #
-# Y hay algo mas de fondo. La escala absoluta de d NO es identificable desde
-# datos de carrera, porque el unico observable es delta y nada ancla d salvo la
-# saturacion en d = 1, a la que solo se llega destruyendo el neumatico. Los
-# equipos paran mucho antes. Dejar gamma libre hace que el ajuste empuje d hacia
-# cero y gamma hacia arriba hasta chocar con la cota: se comprobo con Monza +
-# Hungria, donde gamma1 y gamma2 terminaron pegadas a sus dos topes.
+# And there is something deeper. The absolute scale of d is NOT identifiable
+# from race data, because the only observable is delta and nothing anchors d
+# except the saturation at d = 1, which you only reach by destroying the tire.
+# Teams pit long before that. Leaving gamma free makes the fit push d towards
+# zero and gamma upwards until it hits the bound: verified on Monza + Hungary,
+# where gamma1 and gamma2 both ended pinned against their ceilings.
 #
-# Por eso gamma se toma tambien de la calibracion: "un segundo de perdida de
-# ritmo equivale a este desgaste" es una afirmacion de calibracion, no algo que
-# los tiempos por vuelta puedan responder. Quedan libres las dos cantidades que
-# si varian de un circuito o un compuesto a otro.
+# So gamma is taken from calibration too: "one second of pace loss corresponds
+# to this much wear" is a calibration statement, not something lap times can
+# answer. What stays free are the two quantities that genuinely do vary from one
+# circuit or compound to another.
 REAL_DATA_FREE_PARAMS = ("kw", "kappa")
 
-# Indice de dureza del compuesto: 0 = mas blando, 1 = mas duro.
+# Compound hardness index: 0 = softest, 1 = hardest.
 COMPOUND_INDEX = {
     "HYPERSOFT": 0.0,
     "ULTRASOFT": 0.0,
@@ -56,10 +56,10 @@ COMPOUND_INDEX = {
 
 @dataclass(frozen=True)
 class ContextRanges:
-    """Rangos fisicos admisibles de cada variable de contexto (ya normalizada).
+    """Physically admissible range of each (already normalised) context variable.
 
-    Definen el hipercubo sobre el que se imponen los residuos de la EDO, es
-    decir, la region donde la fisica regulariza a la red aunque no haya datos.
+    These define the hypercube over which the ODE residuals are enforced, i.e.
+    the region where physics regularises the network even without data.
     """
 
     tau: tuple[float, float] = (0.0, 1.40)
@@ -78,56 +78,56 @@ class ContextRanges:
 
 @dataclass
 class PhysicsConfig:
-    """Escalas de adimensionalizacion y parametros del modelo termo-mecanico."""
+    """Non-dimensionalisation scales and thermo-mechanical model parameters."""
 
-    # --- escalas ---
-    lap_ref: float = 30.0          # L_ref: vueltas por unidad de tau
-    dT_ref: float = 40.0           # Delta T_ref [K] para adimensionalizar theta
-    theta_init: float = 0.5        # theta(tau=0): salida de boxes con mantas
-    d_max: float = 1.10            # cota superior admisible de la degradacion
+    # --- scales ---
+    lap_ref: float = 30.0          # L_ref: laps per unit of tau
+    dT_ref: float = 40.0           # Delta T_ref [K], the temperature scale
+    theta_init: float = 0.5        # theta(tau=0): leaving the pits off blankets
+    d_max: float = 1.10            # admissible upper bound on degradation
 
-    # --- parametro que ancla la escala de temperatura (ver README: identificabilidad) ---
+    # --- parameter that anchors the temperature scale (see README: identifiability) ---
     A_gen: float = 8.0
     train_A_gen: bool = False
 
-    # --- valores iniciales de los parametros aprendibles (problema inverso) ---
-    zeta_init: float = 0.50        # acoplamiento desgaste -> temperatura (cliff)
-    h0_init: float = 4.0           # enfriamiento base
-    h1_init: float = 2.0           # enfriamiento forzado por velocidad
-    kw_init: float = 0.80          # coeficiente de desgaste (Archard)
-    m_init: float = 1.00           # exponente de carga mecanica
-    Ea_init: float = 0.60          # activacion termica (Arrhenius linealizado)
-    kappa_init: float = 0.50       # resistencia del compuesto al desgaste
-    gamma1_init: float = 1.00      # perdida de ritmo lineal [s]
-    gamma2_init: float = 1.50      # perdida de ritmo del cliff [s]
+    # --- initial values of the learnable parameters (inverse problem) ---
+    zeta_init: float = 0.50        # wear -> temperature coupling (drives the cliff)
+    h0_init: float = 4.0           # baseline cooling
+    h1_init: float = 2.0           # speed-driven forced convection
+    kw_init: float = 0.80          # wear coefficient (Archard)
+    m_init: float = 1.00           # mechanical load exponent
+    Ea_init: float = 0.60          # thermal activation (linearised Arrhenius)
+    kappa_init: float = 0.50       # compound resistance to wear
+    gamma1_init: float = 1.00      # linear pace loss [s]
+    gamma2_init: float = 1.50      # cliff pace loss [s]
 
-    # Cotas fisicas duras sobre los parametros del observable. Son necesarias,
-    # no cosmeticas: (d, gamma1, gamma2) tienen una degeneracion exacta de
-    # escala, porque d -> e*d con gamma1 -> gamma1/e y gamma2 -> gamma2/e^p
-    # deja delta identica. Con datos sinteticos la degeneracion la rompen el
-    # proxy termico y los stints que saturan en d = 1; con datos reales no hay
-    # ninguna de las dos cosas y el optimizador se va por esa direccion hasta
-    # desbordar. Lo que la cierra es una afirmacion fisica sencilla: un
-    # neumatico destruido cuesta unos segundos por vuelta, no millones.
+    # Hard physical bounds on the observable parameters. These are necessary,
+    # not cosmetic: (d, gamma1, gamma2) have an exact scale degeneracy, because
+    # d -> e*d with gamma1 -> gamma1/e and gamma2 -> gamma2/e^p leaves delta
+    # unchanged. On synthetic data the degeneracy is broken by the thermal proxy
+    # and by stints that saturate at d = 1; with real data neither exists and
+    # the optimiser slides along that direction until it overflows. What closes
+    # it is a simple physical assertion: a destroyed tire costs a few seconds a
+    # lap, not millions.
     gamma1_bounds: tuple[float, float] = (0.2, 4.0)   # [s]
     gamma2_bounds: tuple[float, float] = (0.2, 6.0)   # [s]
 
-    # --- observable de ritmo ---
-    cliff_exponent: float = 8.0    # p en delta = g1*d + g2*d^p
+    # --- pace-loss observable ---
+    cliff_exponent: float = 8.0    # p in delta = g1*d + g2*d^p
 
-    # --- definicion operativa del cliff ---
+    # --- operational definition of the cliff ---
     cliff_slope_s_per_lap: float = 0.15
     d_crit: float = 0.85
-    # Horizonte de decision estrategica. Define hasta donde se impone la EDO:
-    # el dominio fisico lo fija la pregunta que se le va a hacer al modelo, no
-    # la longitud de los stints que se alcanzaron a observar.
+    # Strategic decision horizon. It defines how far the ODE is enforced: the
+    # physical domain is set by the question the model will be asked, not by how
+    # long the observed stints happened to run.
     strategy_horizon: int = 45
-    exp_clamp: float = 6.0         # cota del exponente de Arrhenius (estabilidad)
+    exp_clamp: float = 6.0         # cap on the Arrhenius exponent (stability)
 
 
 @dataclass
 class PINNConfig:
-    """Arquitectura y regimen de entrenamiento de la PINN (DeepXDE)."""
+    """PINN architecture and training regime (DeepXDE)."""
 
     hidden: Sequence[int] = (64, 64, 64, 64)
     activation: str = "tanh"
@@ -138,19 +138,19 @@ class PINNConfig:
     lbfgs_iters: int = 3000
     display_every: int = 1000
 
-    num_domain: int = 4000         # colocacion uniforme en el hipercubo
-    tau_collocation: int = 40      # puntos en tau por contexto observado
+    num_domain: int = 4000         # uniform collocation across the hypercube
+    tau_collocation: int = 40      # points in tau per observed context
 
-    # pesos de las componentes de la funcion de perdida
+    # weights of the individual loss components
     w_pde_theta: float = 1.0
     w_pde_wear: float = 1.0
     w_bound: float = 10.0
     w_data_delta: float = 20.0
     w_data_theta: float = 1.0
 
-    use_theta_proxy: bool = True   # supervision debil sobre la temperatura
-    # Parametros fisicos que se estiman. Los que no esten aqui se mantienen
-    # fijos en el valor de `PhysicsConfig`.
+    use_theta_proxy: bool = True   # weak supervision on temperature
+    # Physical parameters that get estimated. Anything not listed here stays
+    # fixed at its `PhysicsConfig` value.
     free_params: tuple[str, ...] = LEARNABLE_PARAMS
     seed: int = 42
     float64: bool = False
@@ -158,11 +158,11 @@ class PINNConfig:
 
 @dataclass
 class DataConfig:
-    """Origen y preprocesamiento de los stints."""
+    """Stint source and preprocessing."""
 
     source: str = "synthetic"      # {"synthetic", "fastf1"}
 
-    # --- generador sintetico (banco de pruebas con verdad fisica conocida) ---
+    # --- synthetic generator (test bench with known physical ground truth) ---
     n_stints: int = 40
     min_stint: int = 12
     max_stint: int = 34
@@ -175,21 +175,22 @@ class DataConfig:
     session: str = "R"
     drivers: tuple[str, ...] = ()
     cache_dir: str = "cache"
-    fuel_effect_s_per_lap: float = 0.055   # correccion de combustible [s/vuelta]
+    fuel_effect_s_per_lap: float = 0.055   # fuel correction [s/lap]
 
-    # Referencias fijas para adimensionalizar los proxys de telemetria.
-    # Deliberadamente NO son la mediana de la sesion: normalizar cada carrera
-    # contra si misma dejaria a Monza y a Hungria ambas en 1.0 y borraria
-    # justamente la variacion entre circuitos que el modelo necesita aprender.
-    # Calibradas sobre carreras de 2023 (Monza: 1877 / 3.39 / 66.4;
-    # Hungria: 1968 / 4.35 / 51.6).
-    q_fric_ref: float = 1900.0     # potencia friccional especifica [W/kg]
-    load_ref: float = 3.8          # carga mecanica media [g]
-    speed_ref: float = 58.0        # velocidad media [m/s]
+    # Fixed references for making the telemetry proxies dimensionless.
+    # Deliberately NOT the session median: normalising each race against itself
+    # would put both Monza and Hungary at 1.0 and erase precisely the
+    # between-circuit variation the model needs to learn.
+    # Calibrated on 2023 races (Monza: 1877 / 3.39 / 66.4;
+    # Hungary: 1968 / 4.35 / 51.6).
+    q_fric_ref: float = 1900.0     # specific frictional power [W/kg]
+    load_ref: float = 3.8          # mean mechanical load [g]
+    speed_ref: float = 58.0        # mean speed [m/s]
+
     min_stint_laps: int = 8
-    ref_window: int = 3            # vueltas para el ritmo de referencia del stint
-    max_delta_s: float = 6.0       # descarta vueltas con trafico/incidentes
-    only_fresh_tyres: bool = True  # d(0)=0 solo vale para un juego nuevo
+    ref_window: int = 3            # laps considered for the stint reference pace
+    max_delta_s: float = 6.0       # discards laps lost to traffic/incidents
+    only_fresh_tyres: bool = True  # d(0)=0 only holds for a brand-new set
 
     test_fraction: float = 0.25
 

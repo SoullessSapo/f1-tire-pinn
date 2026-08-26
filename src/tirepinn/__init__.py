@@ -1,8 +1,8 @@
-"""F1-Tire-PINN: Physics-Informed Neural Network para degradacion de neumaticos.
+"""F1-Tire-PINN: Physics-Informed Neural Network for tire degradation.
 
-Implementa la parte de modelado del proyecto "Real-Time Prediction of Formula 1
-Tire Degradation using Physics-Informed Neural Networks": el sistema fisico,
-la PINN construida con DeepXDE, los baselines de comparacion y la evaluacion.
+Implements the modelling half of the project "Real-Time Prediction of Formula 1
+Tire Degradation using Physics-Informed Neural Networks": the physical system,
+the PINN built with DeepXDE, the comparison baselines and the evaluation.
 """
 
 __version__ = "0.1.0"

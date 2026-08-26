@@ -1,7 +1,7 @@
-"""Figuras del experimento.
+"""Experiment figures.
 
-Todas se guardan como PNG en el directorio de salida y estan pensadas para
-entrar directamente en el informe.
+All are written as PNGs into the output directory and are meant to drop
+straight into the report.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from .physics import cliff_lap, pace_loss
 
 COLORS = {
     "PINN": "#d62728",
-    "LSTM (caja negra)": "#1f77b4",
-    "Lineal (clasico)": "#7f7f7f",
+    "LSTM (black box)": "#1f77b4",
+    "Linear (classic)": "#7f7f7f",
 }
 _DEFAULT_COLOR = "#2ca02c"
 
@@ -52,7 +52,7 @@ def plot_stint_grid(
     path: str | Path,
     max_stints: int = 6,
 ) -> None:
-    """Curvas de degradacion observadas frente a las predichas por cada modelo."""
+    """Observed degradation curves against each model's prediction."""
     _style()
     stints = data.stints[:max_stints]
     ncol = 3
@@ -60,35 +60,37 @@ def plot_stint_grid(
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.0 * ncol, 3.0 * nrow), squeeze=False)
 
     for ax, stint in zip(axes.ravel(), stints, strict=False):
-        ax.plot(stint.laps, stint.delta, "o", ms=3.5, color="black", label="Observado", zorder=5)
+        ax.plot(stint.laps, stint.delta, "o", ms=3.5, color="black", label="Observed", zorder=5)
         for name, model in models.items():
             pred = np.asarray(model.predict_stint(stint.context, stint.laps)).ravel()
             ax.plot(stint.laps, pred, lw=1.8, color=_color(name), label=name)
         truth = cliff_lap(stint.laps, stint.delta, phys)
         if truth is not None:
-            ax.axvline(truth, ls=":", lw=1.2, color="darkorange", label="Cliff observado")
+            ax.axvline(truth, ls=":", lw=1.2, color="darkorange", label="Observed cliff")
         ax.set_title(f"{stint.stint_id} - {stint.compound}", fontsize=9)
-        ax.set_xlabel("Vuelta del stint")
-        ax.set_ylabel("Perdida de ritmo [s]")
+        ax.set_xlabel("Stint lap")
+        ax.set_ylabel("Pace loss [s]")
 
     for ax in axes.ravel()[len(stints) :]:
         ax.axis("off")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels))
-    fig.suptitle("Degradacion por stint: prediccion vs observacion (conjunto de prueba)")
+    fig.suptitle("Degradation per stint: prediction vs observation (test set)")
     fig.tight_layout(rect=(0, 0.06, 1, 0.96))
     fig.savefig(path)
     plt.close(fig)
 
 
-def plot_latent_states(pinn, data: StintDataset, phys: PhysicsConfig, path: str | Path, n: int = 3) -> None:
-    """Estados latentes reconstruidos por la PINN.
+def plot_latent_states(
+    pinn, data: StintDataset, phys: PhysicsConfig, path: str | Path, n: int = 3
+) -> None:
+    """Latent states reconstructed by the PINN.
 
-    `d` no aparece nunca en la funcion de perdida: la red solo ve la perdida de
-    ritmo, y el desgaste sale de imponer la EDO. `theta` si recibe supervision
-    debil del proxy termico cuando esta activado (banco sintetico), con un peso
-    muy inferior al del termino de datos. La figura compara ambos contra la
-    verdad sintetica.
+    `d` never appears in the loss function: the network only sees pace loss, and
+    wear comes out of enforcing the ODE. `theta` does receive weak supervision
+    from the thermal proxy when it is enabled (synthetic bench), at a far lower
+    weight than the data term. The figure compares both against the synthetic
+    ground truth.
     """
     _style()
     stints = [s for s in data.stints if s.d_true is not None][:n]
@@ -98,22 +100,22 @@ def plot_latent_states(pinn, data: StintDataset, phys: PhysicsConfig, path: str 
 
     for j, stint in enumerate(stints):
         pred = pinn.predict_curve(stint.context, stint.laps)
-        axes[0, j].plot(stint.laps, stint.theta_true, "o", ms=3, color="black", label="Verdad")
+        axes[0, j].plot(stint.laps, stint.theta_true, "o", ms=3, color="black", label="Ground truth")
         axes[0, j].plot(stint.laps, pred["theta"], lw=1.8, color="#d62728", label="PINN")
         axes[0, j].set_title(f"{stint.stint_id} - {stint.compound}", fontsize=9)
-        axes[0, j].set_ylabel(r"$\theta$  (exceso termico)")
+        axes[0, j].set_ylabel(r"$\theta$  (thermal excess)")
 
-        axes[1, j].plot(stint.laps, stint.d_true, "o", ms=3, color="black", label="Verdad")
+        axes[1, j].plot(stint.laps, stint.d_true, "o", ms=3, color="black", label="Ground truth")
         axes[1, j].plot(stint.laps, pred["d"], lw=1.8, color="#d62728", label="PINN")
         axes[1, j].axhline(phys.d_crit, ls=":", lw=1.2, color="darkorange", label=r"$d_{crit}$")
-        axes[1, j].set_ylabel("d  (banda consumida)")
-        axes[1, j].set_xlabel("Vuelta del stint")
+        axes[1, j].set_ylabel("d  (tread consumed)")
+        axes[1, j].set_xlabel("Stint lap")
 
     handles, labels = axes[1, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels))
     fig.suptitle(
-        "Estados latentes: d se reconstruye solo con la EDO (nunca se observa); "
-        "theta lleva supervision debil"
+        "Latent states: d is reconstructed from the ODE alone (never observed); "
+        "theta carries weak supervision"
     )
     fig.tight_layout(rect=(0, 0.06, 1, 0.95))
     fig.savefig(path)
@@ -128,11 +130,11 @@ def plot_extrapolation(
     horizon: int | None = None,
     n: int = 3,
 ) -> None:
-    """Comportamiento mas alla del stint observado.
+    """Behaviour beyond the observed stint.
 
-    Es la figura que separa la PINN de la caja negra: en la zona sin datos la
-    PINN sigue integrando la EDO, mientras que la LSTM queda sin ninguna
-    restriccion y puede devolver curvas que bajan.
+    This is the figure that separates the PINN from the black box: in the
+    data-free zone the PINN keeps integrating the ODE, while the LSTM is left
+    with no constraint at all and can return curves that bend downwards.
     """
     _style()
     horizon = horizon or phys.strategy_horizon
@@ -142,25 +144,25 @@ def plot_extrapolation(
 
     for ax, stint in zip(axes.ravel(), stints, strict=False):
         ax.axvspan(1, stint.laps.max(), color="0.92", zorder=0)
-        ax.plot(stint.laps, stint.delta, "o", ms=3.5, color="black", label="Observado", zorder=5)
+        ax.plot(stint.laps, stint.delta, "o", ms=3.5, color="black", label="Observed", zorder=5)
         for name, model in models.items():
             pred = np.asarray(model.predict_stint(stint.context, laps_long)).ravel()
             ax.plot(laps_long, pred, lw=1.8, color=_color(name), label=name)
         ax.axvline(stint.laps.max(), ls="--", lw=1.0, color="0.4")
         ax.set_title(f"{stint.stint_id} - {stint.compound}", fontsize=9)
-        ax.set_xlabel("Vuelta del stint")
-        ax.set_ylabel("Perdida de ritmo [s]")
+        ax.set_xlabel("Stint lap")
+        ax.set_ylabel("Pace loss [s]")
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels) + 1)
-    fig.suptitle("Extrapolacion fuera de los datos (zona gris = vueltas observadas)")
+    fig.suptitle("Extrapolation beyond the data (grey band = observed laps)")
     fig.tight_layout(rect=(0, 0.10, 1, 0.94))
     fig.savefig(path)
     plt.close(fig)
 
 
 def plot_parameter_convergence(var_history, truth, path: str | Path) -> None:
-    """Convergencia de los parametros fisicos estimados hacia la verdad."""
+    """Convergence of the estimated physical parameters towards the truth."""
     if not var_history:
         return
     _style()
@@ -172,24 +174,26 @@ def plot_parameter_convergence(var_history, truth, path: str | Path) -> None:
 
     for ax, name in zip(axes.ravel(), names, strict=False):
         values = [v[name] for _, v in var_history]
-        ax.plot(steps, values, lw=1.8, color="#d62728", label="Estimado")
+        ax.plot(steps, values, lw=1.8, color="#d62728", label="Estimated")
         if truth is not None and hasattr(truth, name):
-            ax.axhline(float(getattr(truth, name)), ls="--", lw=1.2, color="black", label="Verdad")
+            ax.axhline(
+                float(getattr(truth, name)), ls="--", lw=1.2, color="black", label="Ground truth"
+            )
         ax.set_title(name, fontsize=9)
-        ax.set_xlabel("Iteracion")
+        ax.set_xlabel("Iteration")
 
     for ax in axes.ravel()[len(names) :]:
         ax.axis("off")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=2)
-    fig.suptitle("Problema inverso: recuperacion de los parametros fisicos")
+    fig.suptitle("Inverse problem: recovery of the physical parameters")
     fig.tight_layout(rect=(0, 0.05, 1, 0.95))
     fig.savefig(path)
     plt.close(fig)
 
 
 def plot_loss_history(losshistory, path: str | Path, labels: list[str] | None = None) -> None:
-    """Evolucion de cada termino de la funcion de perdida."""
+    """Evolution of each term of the loss function."""
     if losshistory is None:
         return
     _style()
@@ -199,10 +203,12 @@ def plot_loss_history(losshistory, path: str | Path, labels: list[str] | None = 
 
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
     for i in range(losses.shape[1]):
-        ax.semilogy(steps, losses[:, i], lw=1.5, label=labels[i] if i < len(labels) else f"L{i + 1}")
-    ax.set_xlabel("Iteracion")
-    ax.set_ylabel("Perdida (escala log)")
-    ax.set_title("Terminos de la funcion de perdida")
+        ax.semilogy(
+            steps, losses[:, i], lw=1.5, label=labels[i] if i < len(labels) else f"L{i + 1}"
+        )
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Loss (log scale)")
+    ax.set_title("Terms of the loss function")
     ax.legend(ncol=2, fontsize=8)
     fig.tight_layout()
     fig.savefig(path)
@@ -212,10 +218,10 @@ def plot_loss_history(losshistory, path: str | Path, labels: list[str] | None = 
 def plot_cliff_map(
     pinn, phys: PhysicsConfig, path: str | Path, horizon: int | None = None, res: int = 24
 ) -> None:
-    """Mapa estrategico: vuelta esperada del cliff segun compuesto y condiciones.
+    """Strategy map: expected cliff lap by compound and conditions.
 
-    Es el producto final desde el punto de vista del muro de boxes, y solo es
-    posible porque la red es parametrica: cada celda es un paso forward.
+    This is the end product from the pit wall's point of view, and it is only
+    possible because the network is parametric: each cell is one forward pass.
     """
     _style()
     horizon = horizon or phys.strategy_horizon
@@ -241,8 +247,8 @@ def plot_cliff_map(
             ],
             axis=1,
         )
-        # Todas las celdas en una sola llamada: la red es paramétrica, asi que
-        # el mapa completo cuesta un unico paso forward por lotes.
+        # Every cell in a single call: the network is parametric, so the whole
+        # map costs one batched forward pass.
         x = np.empty((n_cells * laps.size, contexts.shape[1] + 1))
         x[:, 0] = np.tile(tau, n_cells)
         x[:, 1:] = np.repeat(contexts, laps.size, axis=0)
@@ -256,9 +262,9 @@ def plot_cliff_map(
     finite = np.concatenate([g[np.isfinite(g)] for g in grids]) if grids else np.array([1.0])
     vmin, vmax = (float(finite.min()), float(finite.max())) if finite.size else (1.0, horizon)
 
-    # Escala de riesgo: rojo = el cliff llega pronto, verde = aguanta. Las
-    # celdas sin cliff dentro del horizonte se pintan en gris explicito, no en
-    # blanco, para que se lean como "aguanta" y no como panel vacio.
+    # Risk scale: red = the cliff arrives early, green = it survives. Cells with
+    # no cliff inside the horizon are painted explicit grey rather than white, so
+    # they read as "survives" instead of as an empty panel.
     cmap = plt.get_cmap("RdYlGn").copy()
     cmap.set_bad("0.85")
 
@@ -274,15 +280,12 @@ def plot_cliff_map(
             extent=(track[0], track[-1], load[0], load[-1]),
         )
         ax.set_title(label, fontsize=10)
-        ax.set_xlabel("Temperatura de pista (norm.)")
-        ax.set_ylabel("Carga mecanica (norm.)")
+        ax.set_xlabel("Track temperature (norm.)")
+        ax.set_ylabel("Mechanical load (norm.)")
         ax.set_facecolor("0.85")
         ax.grid(False)
 
-    fig.colorbar(im, ax=axes.ravel().tolist(), label="Vuelta del cliff")
-    fig.suptitle(
-        f"Mapa de decision: vuelta esperada del cliff "
-        f"(gris = sin cliff en {horizon} vueltas)"
-    )
+    fig.colorbar(im, ax=axes.ravel().tolist(), label="Cliff lap")
+    fig.suptitle(f"Decision map: expected cliff lap (grey = no cliff within {horizon} laps)")
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)

@@ -1,16 +1,16 @@
-"""Banco de pruebas sintetico con verdad fisica conocida.
+"""Synthetic test bench with known physical ground truth.
 
-Integra el sistema (E1)-(E2) con los parametros de `physics.GROUND_TRUTH` y le
-anade ruido de medicion. Sirve para dos cosas:
+Integrates the (E1)-(E2) system with the parameters in `physics.GROUND_TRUTH`
+and adds measurement noise. It serves two purposes:
 
-1. Que el pipeline completo corra sin depender de la red ni de la API de FastF1.
-2. Validar el problema inverso: la PINN parte de valores iniciales distintos y
-   debe *recuperar* los parametros fisicos verdaderos solo a partir de la
-   perdida de ritmo observada. Con datos reales esa verificacion es imposible
-   porque no existe la verdad de referencia.
+1. The whole pipeline runs without depending on the network or the FastF1 API.
+2. It validates the inverse problem: the PINN starts from deliberately
+   different initial values and must *recover* the true physical parameters
+   from the observed pace loss alone. With real data that check is impossible,
+   because no reference ground truth exists.
 
-El generador imita la decision de un estratega: el stint se corta un par de
-vueltas despues del cliff, porque ningun equipo rueda con el neumatico agotado.
+The generator imitates a strategist's decision: the stint is cut a couple of
+laps after the cliff, because no team runs a destroyed tire.
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ from .config import COMPOUND_INDEX, ContextRanges, DataConfig, PhysicsConfig
 from .dataset import Stint, StintDataset
 from .physics import GROUND_TRUTH, TireParams, cliff_lap, integrate_stint, pace_loss
 
-# Compuestos que se simulan y su rango tipico de exigencia relativa.
+# Compounds simulated, in order.
 _COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
 
 
 def _sample_context(rng: np.random.Generator, ranges: ContextRanges, compound: str) -> np.ndarray:
-    """Muestrea un contexto plausible para un compuesto dado."""
+    """Sample a plausible context for a given compound."""
     q = rng.uniform(*ranges.q_fric)
     load = rng.uniform(*ranges.load)
     speed = rng.uniform(*ranges.speed)
@@ -42,7 +42,7 @@ def generate(
     params: TireParams = GROUND_TRUTH,
     seed: int = 0,
 ) -> StintDataset:
-    """Genera `cfg.n_stints` stints sinteticos."""
+    """Generate `cfg.n_stints` synthetic stints."""
     ranges = ranges or ContextRanges()
     rng = np.random.default_rng(seed)
     stints: list[Stint] = []
@@ -51,17 +51,18 @@ def generate(
         compound = _COMPOUNDS[i % len(_COMPOUNDS)]
         context = _sample_context(rng, ranges, compound)
 
-        # Se integra hasta el maximo y luego se decide donde habria parado el equipo.
+        # Integrate to the maximum length, then decide where the team would
+        # actually have pitted.
         laps_full, theta_full, d_full = integrate_stint(cfg.max_stint, context, params, phys)
         delta_full = pace_loss(d_full, params)
         cliff = cliff_lap(laps_full, delta_full, phys)
 
         if cliff is not None:
-            # Se dejan algunas vueltas *despues* del cliff. Un equipo no para en
-            # el instante exacto: pierde un par de vueltas decidiendo, esperando
-            # hueco en boxes o cubriendo a un rival. Ademas son las unicas
-            # vueltas que informan sobre el regimen d -> 1, del que dependen
-            # gamma2 y la escala de kw (ver README, identificabilidad).
+            # Leave a few laps *after* the cliff. A team does not pit at the
+            # exact instant: it loses laps deciding, waiting for a pit window or
+            # covering a rival. Those are also the only laps that carry
+            # information about the d -> 1 regime, which is what gamma2 and the
+            # scale of kw depend on (see README, identifiability).
             n_laps = int(min(cfg.max_stint, cliff + rng.integers(2, 6)))
         else:
             n_laps = int(rng.integers(cfg.min_stint, cfg.max_stint + 1))
@@ -72,8 +73,8 @@ def generate(
         d = d_full[:n_laps]
         delta = delta_full[:n_laps]
 
-        # Ruido de medicion: el cronometraje real tiene trafico, viento y errores
-        # de pilotaje que no dependen del neumatico.
+        # Measurement noise: real timing carries traffic, wind and driver error
+        # that have nothing to do with the tire.
         delta_obs = delta + rng.normal(0.0, cfg.noise_delta_s, size=delta.shape)
         theta_obs = theta + rng.normal(0.0, cfg.noise_theta, size=theta.shape)
 

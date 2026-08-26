@@ -9,7 +9,7 @@ Degradation using Physics-Informed Neural Networks*. **The AWS cloud layer is ou
 of scope**: what lives here is the physical system, the network, offline
 training, the comparison baselines and the evaluation.
 
-![Extrapolation: PINN vs black box](outputs/02_extrapolacion.png)
+![Extrapolation: PINN vs black box](outputs/02_extrapolation.png)
 
 *The figure that sums up the whole project. The grey band is the observed laps;
 to the right of the dashed line every model is extrapolating. In the left panel
@@ -200,11 +200,11 @@ python run_infer.py --compound SOFT --track-temp 0.8 --load 1.2
 | File | Contents |
 |---|---|
 | `01_stints.png` | predicted vs observed curves, test stints |
-| `02_extrapolacion.png` | behaviour beyond the data: PINN vs black box |
-| `03_estados_latentes.png` | `θ` and `d` reconstructed vs synthetic ground truth |
-| `04_parametros.png` | inverse-problem convergence |
-| `05_perdida.png` | evolution of each loss term |
-| `06_mapa_cliff.png` | decision map: cliff lap by compound and conditions |
+| `02_extrapolation.png` | behaviour beyond the data: PINN vs black box |
+| `03_latent_states.png` | `θ` and `d` reconstructed vs synthetic ground truth |
+| `04_parameters.png` | inverse-problem convergence |
+| `05_loss.png` | evolution of each loss term |
+| `06_cliff_map.png` | decision map: cliff lap by compound and conditions |
 | `report.txt` | metrics table and parameter recovery |
 | `pinn_weights.pt`, `pinn_params.json` | trained model, ready for inference |
 
@@ -334,7 +334,7 @@ negative values.*
 
 ### Latent states: what the network reconstructs without ever seeing it
 
-![Latent states](outputs/03_estados_latentes.png)
+![Latent states](outputs/03_latent_states.png)
 
 *Conceptually the most important figure. `d` (bottom row) is the fraction of
 tread consumed and **never appears in the training data** — the network only sees
@@ -345,7 +345,7 @@ observes.*
 
 ### Physical parameter recovery
 
-![Parameter convergence](outputs/04_parametros.png)
+![Parameter convergence](outputs/04_parameters.png)
 
 *All nine physical constants converge to their true value (dashed black line)
 starting from deliberately wrong initial values. Note the jump in `zeta`, `h0`
@@ -367,33 +367,41 @@ ones using **only the observed pace loss**:
 | `γ₂` (cliff magnitude) | 2.722 | 2.600 | 4.7 % |
 | | | **mean** | **2.1 %** |
 
-In `04_parametros.png` you can see that `ζ`, `h₀` and `h₁` stall through all
+In `04_parameters.png` you can see that `ζ`, `h₀` and `h₁` stall through all
 15 000 Adam iterations and only jump to their true value during the L-BFGS phase.
 The thermal parameters are the worst-conditioned in the problem — they only reach
 `δ` through two layers of composition — and need a second-order optimiser. That
 is the concrete reason the Adam → L-BFGS regime is not optional here.
 
-### On real telemetry (Monza + Hungary 2023, 38 stints)
+### On real telemetry (Monza + Hungary 2023, 36 stints)
 
 Here the result is **worse**, and it is worth saying so plainly:
 
 | Model | RMSE [s] | MAE [s] | Cliffs found | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|---|
-| PINN | 0.697 | 0.476 | 9/9 | 18.3 % | 9.6 % |
-| Linear (classic) | **0.529** | **0.424** | 0/9 | 0.0 % | 0.0 % |
-| LSTM (black box) | 0.522 | 0.414 | 4/9 | 0.0 % | 5.6 % |
+| PINN | 1.172 | 0.725 | 7/9 | 6.3 % | 6.3 % |
+| Linear (classic) | **0.539** | **0.429** | 0/9 | 0.0 % | 0.0 % |
+| LSTM (black box) | 0.536 | 0.423 | 3/9 | 0.6 % | 8.8 % |
 
-**The PINN does not beat the baselines on two races.** With 38 stints, a ~0.5 s
+**The PINN does not beat the baselines on two races.** With 36 stints, a ~0.5 s
 per lap noise floor and very little variation in conditions, the observed
 degradation curve is close to linear over the measured range — and a linear fit
 is hard to beat there. The PINN pays the price of being constrained without yet
 being able to collect the benefit.
 
-The fitted parameters are physically reasonable (`k_w = 0.864`, `κ = 0.963`) and
-none is pinned against a bound, which was the symptom of the degeneracy. But the
-wear-ODE residual settles around 0.15 — two orders of magnitude worse than on the
-synthetic bench — and that is where the remaining monotonicity violations come
-from.
+The fitted parameters are physically reasonable (`k_w = 0.813`, `κ = 0.968`) and
+neither is pinned against a bound, which was the symptom of the degeneracy. But
+the wear-ODE residual settles around 0.15 — two orders of magnitude worse than on
+the synthetic bench — and that is where the remaining monotonicity violations
+come from.
+
+> **These real-data numbers are not stable run to run.** An earlier run of the
+> same configuration gave PINN RMSE 0.697 with 18.3 % interpolation violations.
+> The synthetic results, by contrast, reproduce to the digit. That contrast is
+> itself a measurement: on real data the fit sits close to the degenerate
+> direction described above, so it is badly conditioned and small numerical
+> differences move the answer. Treat the real-data row as an order of magnitude,
+> not as a precise figure.
 
 The honest conclusion is that **the real-data path is mechanically validated but
 not scientifically validated**: it runs end to end and produces interpretable
@@ -402,7 +410,7 @@ off. That is the natural continuation of this work.
 
 ### The end product: the decision map
 
-![Cliff decision map](outputs/06_mapa_cliff.png)
+![Cliff decision map](outputs/06_cliff_map.png)
 
 *Expected cliff lap as a function of compound, track temperature and mechanical
 load. Red = the cliff arrives early; grey = the set survives the full 45-lap
@@ -459,7 +467,7 @@ run_infer.py         inference and latency
 
 A full walkthrough of the reasoning, the modelling choices and the four
 substantive problems found during development is in
-[DOCUMENTATION.md](DOCUMENTATION.md).
+[DOCUMENTACION.md](DOCUMENTACION.md) *(in Spanish)*.
 
 ---
 

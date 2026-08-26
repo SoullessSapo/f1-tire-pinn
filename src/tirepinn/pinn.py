@@ -1,57 +1,56 @@
-"""PINN parametrica de degradacion de neumaticos, construida sobre DeepXDE.
+"""Parametric tire-degradation PINN, built on DeepXDE.
 
-Diseno
+Design
 ------
-Una PINN clasica resuelve *una* trayectoria: la red toma t y devuelve el estado.
-Eso obligaria a reentrenar por cada stint, lo que es inservible para inferencia
-en vivo. Aqui la red es un **operador solucion parametrico**:
+A textbook PINN solves *one* trajectory: the network takes t and returns the
+state. That would mean retraining for every stint, which is useless for live
+inference. Here the network is a **parametric solution operator**:
 
     N(tau, q, lam, v, T_trk, c)  ->  (theta, d)
 
-es decir, aprende de una sola vez la familia completa de soluciones de la EDO
-para todo el rango de condiciones de carrera. Predecir un stint nuevo es un
-unico paso forward, sin reentrenar y sin integrar nada.
+that is, it learns in one go the entire family of solutions of the ODE across
+the full range of race conditions. Predicting a new stint is a single forward
+pass, with no retraining and no integration.
 
-Funcion de perdida
+Loss function
+-------------
+Five terms, three of physics and two of data:
+
+  L1  residual of (E1), the thermal balance
+  L2  residual of (E2), the wear law
+  L3  penalty on the bound d <= d_max
+  L4  fit to the measured pace loss (the only real observable)
+  L5  weak temperature supervision (optional; see README)
+
+L1-L3 are enforced across the whole condition hypercube, including where there
+is no data: that is the edge over an LSTM, which outside its training
+distribution has nothing tying it to thermodynamics.
+
+Initial conditions
 ------------------
-Cinco terminos, tres de fisica y dos de datos:
+They are imposed *hard*, through an output transform rather than as extra loss
+terms:
 
-  L1  residuo de (E1), balance termico
-  L2  residuo de (E2), ley de desgaste
-  L3  penalizacion de la cota d <= d_max
-  L4  ajuste a la perdida de ritmo medida (el unico observable real)
-  L5  supervision debil de temperatura (opcional; ver README)
+    theta(tau) = theta_0 + tau * N_0(x)      =>  theta(0) = theta_0 exactly
+    d(tau)     = tau * softplus(N_1(x))      =>  d(0) = 0 exactly and d >= 0
 
-L1-L3 se imponen sobre todo el hipercubo de condiciones, tambien donde no hay
-datos: ahi esta la ventaja sobre una LSTM, que fuera de su distribucion de
-entrenamiento no tiene ninguna restriccion que la ate a la termodinamica.
+This removes two loss terms and with them the weight-balancing problem, which is
+the main source of convergence failures in PINNs.
 
-Condiciones iniciales
----------------------
-Se imponen de forma *dura* mediante una transformacion de salida, no como un
-termino mas de la perdida:
+Inverse problem
+---------------
+The physical coefficients (zeta, h0, h1, kw, m, Ea, kappa, gamma1, gamma2) are
+unknown: they are estimated together with the network weights as `dde.Variable`.
+The ODE ones are parametrised in log space, so they are positive by
+construction, which is what their physical meaning requires.
 
-    theta(tau) = theta_0 + tau * N_0(x)      =>  theta(0) = theta_0 exacto
-    d(tau)     = tau * softplus(N_1(x))      =>  d(0) = 0 exacto y d >= 0
-
-Esto elimina dos terminos de la perdida y con ellos el problema de balancear
-sus pesos, que es la principal fuente de fallo de convergencia en PINNs.
-
-Problema inverso
-----------------
-Los coeficientes fisicos (zeta, h0, h1, kw, m, Ea, kappa, gamma1, gamma2) no se
-conocen: se estiman junto con los pesos de la red como `dde.Variable`. Los de la
-EDO se parametrizan en logaritmo, de modo que son positivos por construccion,
-que es lo que exige su significado fisico.
-
-Los del observable (gamma1, gamma2) llevan ademas cota superior, via sigmoide.
-No es una precaucion numerica sino una necesidad: (d, gamma1, gamma2) tienen una
-degeneracion exacta de escala, ya que d -> e*d con gamma1 -> gamma1/e y
-gamma2 -> gamma2/e^p deja delta sin cambio. Con datos sinteticos la rompen el
-proxy termico y los stints que saturan en d = 1; con datos reales no hay ninguna
-de las dos y el ajuste se va por esa direccion hasta desbordar. Acotar gamma es
-afirmar algo que si sabemos: un neumatico destruido cuesta unos pocos segundos
-por vuelta.
+The observable ones (gamma1, gamma2) additionally carry an upper bound, via a
+sigmoid. This is not numerical caution but a necessity: (d, gamma1, gamma2) have
+an exact scale degeneracy, since d -> e*d with gamma1 -> gamma1/e and
+gamma2 -> gamma2/e^p leaves delta unchanged. On synthetic data the thermal proxy
+and the stints that saturate at d = 1 break it; with real data neither exists
+and the fit slides along that direction until it overflows. Bounding gamma
+asserts something we do know: a destroyed tire costs a few seconds a lap.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ from pathlib import Path
 
 import numpy as np
 
-# El backend debe fijarse antes de importar deepxde.
+# The backend must be set before importing deepxde.
 os.environ.setdefault("DDE_BACKEND", "pytorch")
 
 import deepxde as dde
@@ -79,17 +78,17 @@ from .physics import (
     wear_rate,
 )
 
-# Re-exportado por conveniencia: el orden canonico de los parametros fisicos.
+# Re-exported for convenience: the canonical order of the physical parameters.
 LEARNABLE = LEARNABLE_PARAMS
 
 
 def _to_raw(name: str, value: float, cfg) -> float:
-    """Del valor fisico a la variable sin restricciones que optimiza la red.
+    """From a physical value to the unconstrained variable the network optimises.
 
-    Los parametros de la EDO solo necesitan ser positivos, asi que se
-    parametrizan en logaritmo. Los del observable (gamma1, gamma2) ademas
-    llevan cota superior, porque son la direccion degenerada del problema: se
-    mapean con una sigmoide dentro de su rango fisico.
+    The ODE parameters only need to be positive, so they are parametrised in log
+    space. The observable ones (gamma1, gamma2) additionally carry an upper
+    bound, because they are the degenerate direction of the problem: they are
+    mapped with a sigmoid into their physical range.
     """
     bounds = getattr(cfg, f"{name}_bounds", None)
     if bounds is None:
@@ -100,7 +99,7 @@ def _to_raw(name: str, value: float, cfg) -> float:
 
 
 def _from_raw(name: str, raw, cfg):
-    """Inversa de `_to_raw`. Funciona con escalares de numpy y con tensores."""
+    """Inverse of `_to_raw`. Works with numpy scalars and with tensors."""
     bounds = getattr(cfg, f"{name}_bounds", None)
     is_tensor = torch.is_tensor(raw)
     if bounds is None:
@@ -112,7 +111,7 @@ def _from_raw(name: str, raw, cfg):
 
 
 class TirePINN:
-    """PINN parametrica: entrenamiento, inferencia y estimacion de parametros."""
+    """Parametric PINN: training, inference and physical-parameter estimation."""
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -126,10 +125,10 @@ class TirePINN:
         self._has_theta_obs = False
 
     # ------------------------------------------------------------------
-    # Parametros fisicos aprendibles
+    # Learnable physical parameters
     # ------------------------------------------------------------------
     def _param_inits(self) -> dict[str, float]:
-        """Valor de partida de cada parametro fisico, libre o fijo."""
+        """Starting value of every physical parameter, free or fixed."""
         phys = self.cfg.physics
         inits = {name: float(getattr(phys, f"{name}_init")) for name in LEARNABLE}
         if phys.train_A_gen:
@@ -137,7 +136,7 @@ class TirePINN:
         return inits
 
     def _init_variables(self) -> None:
-        """Crea las variables entrenables; el resto de parametros quedan fijos."""
+        """Create the trainable variables; every other parameter stays fixed."""
         phys = self.cfg.physics
         free = set(self.cfg.pinn.free_params) | ({"A_gen"} if phys.train_A_gen else set())
         inits = self._param_inits()
@@ -152,15 +151,15 @@ class TirePINN:
         return list(self._log_vars.values())
 
     def _dtype(self):
-        """Tipo numerico que espera la red.
+        """Numeric type the network expects.
 
-        Debe seguir a `pinn.float64`: si se activa la doble precision y aqui se
-        siguiera enviando float32, la prediccion fallaria por tipos incompatibles.
+        It must follow `pinn.float64`: if double precision is enabled and float32
+        were still sent here, prediction would fail on incompatible types.
         """
         return np.float64 if self.cfg.pinn.float64 else np.float32
 
     def _params_tensor(self) -> TireParams:
-        """Parametros como tensores de torch, para el grafo de autograd."""
+        """Parameters as torch tensors, for the autograd graph."""
         phys = self.cfg.physics
         get = lambda k: (  # noqa: E731
             _from_raw(k, self._log_vars[k], phys) if k in self._log_vars else self._fixed[k]
@@ -181,7 +180,7 @@ class TirePINN:
         )
 
     def learned_params(self) -> TireParams:
-        """Parametros estimados, como escalares de numpy."""
+        """Estimated parameters, as numpy scalars."""
         phys = self.cfg.physics
         vals = dict(self._fixed)
         vals.update({k: _from_raw(k, v.item(), phys) for k, v in self._log_vars.items()})
@@ -200,17 +199,17 @@ class TirePINN:
         )
 
     # ------------------------------------------------------------------
-    # Residuos y observables
+    # Residuals and observables
     # ------------------------------------------------------------------
     def _pde(self, x, y):
-        """Residuos del sistema, evaluados en los puntos de colocacion."""
+        """System residuals, evaluated at the collocation points."""
         phys = self.cfg.physics
         p = self._params_tensor()
 
         q, lam, v, trk, comp = (x[:, i : i + 1] for i in range(1, INPUT_DIM))
         theta, d = y[:, 0:1], y[:, 1:2]
 
-        # Derivadas respecto a tau (dimension 0 de la entrada).
+        # Derivatives with respect to tau (input dimension 0).
         dtheta_dtau = dde.grad.jacobian(y, x, i=0, j=0)
         dd_dtau = dde.grad.jacobian(y, x, i=1, j=0)
 
@@ -220,7 +219,7 @@ class TirePINN:
         return [r_theta, r_wear, r_bound]
 
     def _obs_delta(self, x, y, _):
-        """Operador de observacion: del estado latente d a la perdida de ritmo."""
+        """Observation operator: from the latent state d to the pace loss."""
         return pace_loss(y[:, 1:2], self._params_tensor())
 
     @staticmethod
@@ -228,23 +227,23 @@ class TirePINN:
         return y[:, 0:1]
 
     def _output_transform(self, x, y):
-        """Impone theta(0) = theta_0, d(0) = 0 y d >= 0 de forma exacta."""
+        """Enforces theta(0) = theta_0, d(0) = 0 and d >= 0 exactly."""
         tau = x[:, 0:1]
         theta = self.cfg.physics.theta_init + tau * y[:, 0:1]
         d = tau * F.softplus(y[:, 1:2])
         return torch.cat([theta, d], dim=1)
 
     # ------------------------------------------------------------------
-    # Construccion
+    # Construction
     # ------------------------------------------------------------------
     def _collocation_anchors(self, data: StintDataset) -> np.ndarray:
-        """Puntos de colocacion densos en tau sobre cada contexto observado.
+        """Dense collocation points in tau over every observed context.
 
-        El muestreo uniforme del hipercubo cubre combinaciones de contexto que
-        no ocurren en carrera. Estos anclajes concentran ademas el residuo
-        sobre trayectorias realmente realizables, y llegan hasta el horizonte
-        de decision completo: la EDO se impone tambien en las vueltas que el
-        stint nunca alcanzo, que son justamente las que hay que predecir.
+        Uniform sampling of the hypercube covers context combinations that never
+        occur in a race. These anchors additionally concentrate the residual on
+        genuinely realisable trajectories, and they run out to the full decision
+        horizon: the ODE is enforced on the laps the stint never reached, which
+        are exactly the ones that need predicting.
         """
         phys = self.cfg.physics
         n_tau = self.cfg.pinn.tau_collocation
@@ -257,7 +256,7 @@ class TirePINN:
         return np.vstack(blocks)
 
     def build(self, data: StintDataset) -> None:
-        """Arma geometria, condiciones de observacion, red y modelo."""
+        """Assemble geometry, observation conditions, network and model."""
         cfg, phys = self.cfg, self.cfg.physics
         dde.config.set_random_seed(cfg.pinn.seed)
         if cfg.pinn.float64:
@@ -269,12 +268,12 @@ class TirePINN:
         self._bounds = (lows, highs)
         geom = dde.geometry.Hypercube(lows, highs)
 
-        # --- termino de datos: perdida de ritmo medida ---
+        # --- data term: measured pace loss ---
         x_obs = data.inputs(phys)
         y_obs = data.delta()
         bcs = [dde.icbc.PointSetOperatorBC(x_obs, y_obs, self._obs_delta)]
 
-        # --- termino de datos opcional: proxy de temperatura ---
+        # --- optional data term: temperature proxy ---
         theta_obs = data.theta_observations(phys) if cfg.pinn.use_theta_proxy else None
         self._has_theta_obs = theta_obs is not None
         if theta_obs is not None:
@@ -303,12 +302,12 @@ class TirePINN:
         return w
 
     # ------------------------------------------------------------------
-    # Entrenamiento
+    # Training
     # ------------------------------------------------------------------
     def train(self, out_dir: str | Path | None = None) -> None:
-        """Adam para explorar, L-BFGS para afinar. Es el regimen estandar en PINNs."""
+        """Adam to explore, L-BFGS to refine. The standard regime for PINNs."""
         if self.model is None:
-            raise RuntimeError("Llama a build() antes de train()")
+            raise RuntimeError("Call build() before train()")
         cfg = self.cfg.pinn
         out_dir = Path(out_dir or self.cfg.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -347,11 +346,11 @@ class TirePINN:
         self._read_variable_history(var_file)
 
     def _read_variable_history(self, path: str) -> None:
-        """Recupera la traza de los parametros fisicos para graficar su convergencia.
+        """Recover the physical-parameter trace, to plot its convergence.
 
-        DeepXDE escribe lineas con el formato `<iteracion> [v1, v2, ...]`, donde
-        los valores son las variables sin restricciones que la red optimiza;
-        aqui se transforman de vuelta a unidades fisicas.
+        DeepXDE writes lines of the form `<iteration> [v1, v2, ...]`, where the
+        values are the unconstrained variables the network optimises; here they
+        are mapped back into physical units.
         """
         phys = self.cfg.physics
         names = list(self._log_vars)
@@ -375,14 +374,14 @@ class TirePINN:
         self.var_history = history
 
     # ------------------------------------------------------------------
-    # Inferencia
+    # Inference
     # ------------------------------------------------------------------
     def predict(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Estado latente (theta, d) para una matriz de entradas (n, 6).
+        """Latent state (theta, d) for an (n, 6) input matrix.
 
-        Un modelo recien entrenado pasa por DeepXDE; uno cargado desde disco
-        solo tiene la red, y va por el camino directo de torch. Las dos rutas
-        dan el mismo resultado, asi que el resto del codigo no las distingue.
+        A freshly trained model goes through DeepXDE; one loaded from disk only
+        has the network, and takes the direct torch path. Both give the same
+        result, so the rest of the code does not distinguish between them.
         """
         x = np.asarray(x, dtype=self._dtype()).reshape(-1, INPUT_DIM)
         if self.model is not None:
@@ -390,11 +389,11 @@ class TirePINN:
         elif self.net is not None:
             y = self.forward_numpy(x)
         else:
-            raise RuntimeError("El modelo no esta construido ni cargado")
+            raise RuntimeError("The model is neither built nor loaded")
         return y[:, 0], y[:, 1]
 
     def predict_curve(self, context: np.ndarray, laps: np.ndarray) -> dict[str, np.ndarray]:
-        """Prediccion completa de un stint: temperatura, desgaste y ritmo."""
+        """Full stint prediction: temperature, wear and pace."""
         phys = self.cfg.physics
         laps = np.asarray(laps, dtype=float).ravel()
         tau = (laps / phys.lap_ref).reshape(-1, 1)
@@ -404,14 +403,14 @@ class TirePINN:
         return {"laps": laps, "theta": theta, "d": d, "delta": delta}
 
     def predict_stint(self, context: np.ndarray, laps: np.ndarray) -> np.ndarray:
-        """Perdida de ritmo predicha. Misma firma que los baselines, para que
-        `evaluate.py` mida los tres modelos con la misma vara."""
+        """Predicted pace loss. Same signature as the baselines, so that
+        `evaluate.py` measures all three models with the same yardstick."""
         return self.predict_curve(context, laps)["delta"]
 
     def strategy(
         self, context: np.ndarray, horizon: int | None = None, current_lap: float = 0.0
     ) -> dict:
-        """Salida util para el muro de boxes: vuelta del cliff y vida util remanente."""
+        """Output for the pit wall: cliff lap and remaining useful life."""
         phys = self.cfg.physics
         horizon = horizon or phys.strategy_horizon
         pred = self.predict_curve(context, np.arange(1, horizon + 1))
@@ -425,7 +424,7 @@ class TirePINN:
         }
 
     # ------------------------------------------------------------------
-    # Persistencia
+    # Persistence
     # ------------------------------------------------------------------
     def save(self, out_dir: str | Path) -> None:
         out_dir = Path(out_dir)
@@ -444,7 +443,7 @@ class TirePINN:
 
     @classmethod
     def load(cls, out_dir: str | Path, cfg: Config) -> TirePINN:
-        """Reconstruye la red para inferencia (no requiere los datos de entrenamiento)."""
+        """Rebuild the network for inference (no training data required)."""
         out_dir = Path(out_dir)
         with open(out_dir / "pinn_params.json", encoding="utf-8") as fh:
             payload = json.load(fh)
@@ -465,9 +464,9 @@ class TirePINN:
         return obj
 
     def forward_numpy(self, x: np.ndarray) -> np.ndarray:
-        """Paso forward puro, sin la maquinaria de DeepXDE.
+        """Pure forward pass, without the DeepXDE machinery.
 
-        Es el camino que usaria un servicio de inferencia: solo la red.
+        This is the path an inference service would take: just the network.
         """
         with torch.no_grad():
             t = torch.as_tensor(np.asarray(x, dtype=self._dtype()).reshape(-1, INPUT_DIM))

@@ -1,12 +1,12 @@
-"""Inferencia con el modelo ya entrenado, y medicion de latencia.
+"""Inference with a trained model, plus latency measurement.
 
-Carga solo los pesos de la red (sin datos ni maquinaria de entrenamiento), pide
-una prediccion de estrategia para unas condiciones dadas y mide cuanto tarda un
-paso forward. Es el mismo camino de codigo que ejecutaria un servicio de
-inferencia, y sirve para separar el costo del modelo del costo del transporte
-en el presupuesto de latencia extremo a extremo.
+Loads only the network weights (no data, no training machinery), asks for a
+strategy prediction under given conditions, and measures how long a forward pass
+takes. This is the same code path an inference service would run, and it serves
+to separate the model's cost from transport cost in the end-to-end latency
+budget.
 
-Ejemplo
+Example
 -------
     python run_infer.py --compound SOFT --track-temp 0.8 --load 1.2
 """
@@ -28,16 +28,18 @@ from tirepinn.pinn import TirePINN
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", default="outputs", help="directorio con el modelo entrenado")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--model", default="outputs", help="directory holding the trained model")
     p.add_argument("--compound", default="MEDIUM", choices=sorted(COMPOUND_INDEX))
-    p.add_argument("--q-fric", type=float, default=1.0, help="energia friccional relativa")
-    p.add_argument("--load", type=float, default=1.0, help="carga mecanica relativa")
-    p.add_argument("--speed", type=float, default=1.0, help="velocidad media relativa")
-    p.add_argument("--track-temp", type=float, default=0.5, help="temperatura de pista normalizada 0-1")
-    p.add_argument("--current-lap", type=float, default=0.0, help="vueltas ya rodadas con este juego")
+    p.add_argument("--q-fric", type=float, default=1.0, help="relative frictional energy")
+    p.add_argument("--load", type=float, default=1.0, help="relative mechanical load")
+    p.add_argument("--speed", type=float, default=1.0, help="relative mean speed")
+    p.add_argument("--track-temp", type=float, default=0.5, help="normalised track temperature 0-1")
+    p.add_argument("--current-lap", type=float, default=0.0, help="laps already run on this set")
     p.add_argument("--horizon", type=int, default=45)
-    p.add_argument("--bench", type=int, default=500, help="repeticiones para medir latencia")
+    p.add_argument("--bench", type=int, default=500, help="repetitions for the latency measurement")
     return p.parse_args()
 
 
@@ -45,7 +47,7 @@ def main() -> int:
     args = parse_args()
     model_dir = Path(args.model)
     if not (model_dir / "pinn_weights.pt").exists():
-        print(f"No hay modelo en {model_dir.resolve()}. Corre primero run_train.py")
+        print(f"No model found in {model_dir.resolve()}. Run run_train.py first")
         return 1
 
     pinn = TirePINN.load(model_dir, Config())
@@ -63,22 +65,22 @@ def main() -> int:
     cliff = cliff_lap(laps, delta, pinn.cfg.physics)
 
     print("=" * 62)
-    print(f"Compuesto {args.compound} | pista {args.track_temp:.2f} | carga {args.load:.2f}")
+    print(f"Compound {args.compound} | track {args.track_temp:.2f} | load {args.load:.2f}")
     print("=" * 62)
-    print(f"{'Vuelta':>7s} {'theta':>8s} {'d':>7s} {'Perdida':>9s}")
+    print(f"{'Lap':>7s} {'theta':>8s} {'d':>7s} {'Pace loss':>11s}")
     for i in range(0, args.horizon, 5):
-        print(f"{laps[i]:7.0f} {theta[i]:8.2f} {d[i]:7.3f} {delta[i]:8.2f}s")
+        print(f"{laps[i]:7.0f} {theta[i]:8.2f} {d[i]:7.3f} {delta[i]:10.2f}s")
 
     print()
     if cliff is None:
-        print(f"Sin cliff dentro de {args.horizon} vueltas: el juego aguanta el horizonte.")
+        print(f"No cliff within {args.horizon} laps: the set survives the horizon.")
     else:
         rul = max(cliff - args.current_lap, 0.0)
-        print(f"Cliff previsto en la vuelta {cliff:.0f} del stint.")
-        print(f"Vida util remanente (RUL): {rul:.0f} vueltas desde la vuelta {args.current_lap:.0f}.")
+        print(f"Cliff expected on lap {cliff:.0f} of the stint.")
+        print(f"Remaining useful life (RUL): {rul:.0f} laps from lap {args.current_lap:.0f}.")
 
-    # --- latencia del modelo ---
-    pinn.forward_numpy(x)  # calentamiento
+    # --- model latency ---
+    pinn.forward_numpy(x)  # warm-up
     times = []
     for _ in range(args.bench):
         t0 = time.perf_counter()
@@ -87,8 +89,8 @@ def main() -> int:
     times = np.array(times)
     print()
     print(
-        f"Latencia de inferencia ({args.horizon} vueltas por llamada, {args.bench} repeticiones): "
-        f"media {times.mean():.3f} ms | p50 {np.percentile(times, 50):.3f} ms | "
+        f"Inference latency ({args.horizon} laps per call, {args.bench} repetitions): "
+        f"mean {times.mean():.3f} ms | p50 {np.percentile(times, 50):.3f} ms | "
         f"p95 {np.percentile(times, 95):.3f} ms"
     )
     return 0

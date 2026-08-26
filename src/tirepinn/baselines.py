@@ -1,40 +1,40 @@
-"""Modelos de referencia contra los que se mide la PINN.
+"""Reference models the PINN is measured against.
 
-Dos baselines, elegidos porque representan los dos extremos del estado del arte
-descrito en el proyecto:
+Two baselines, chosen because they represent the two extremes of the state of
+the art described in the project:
 
-- `LinearDegBaseline`: el modelo empirico que usan los equipos, una tasa de
-  degradacion en segundos por vuelta ajustada por compuesto y condiciones. Es
-  rapido e interpretable pero no puede representar el cliff.
+- `LinearDegBaseline`: the empirical model teams use, a degradation rate in
+  seconds per lap fitted per compound and conditions. Fast and interpretable,
+  but it cannot represent the cliff.
 
-- `LSTMBaseline`: la red recurrente de caja negra. Tiene capacidad de sobra
-  para capturar la no linealidad, pero nada la obliga a respetar la
-  termodinamica; en particular puede predecir que el neumatico *recupera*
-  agarre, que es fisicamente imposible.
+- `LSTMBaseline`: the black-box recurrent network. It has ample capacity to
+  capture the nonlinearity, but nothing forces it to respect thermodynamics; in
+  particular it can predict that the tire *regains* grip, which is physically
+  impossible.
 
-Ambos exponen la misma interfaz que la PINN (`predict_stint`), de modo que
-`evaluate.py` los mide exactamente con la misma vara.
+Both expose the same interface as the PINN (`predict_stint`), so `evaluate.py`
+measures them with exactly the same yardstick.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 from .config import PhysicsConfig
 from .dataset import StintDataset
 
 
 class LinearDegBaseline:
-    """Regresion ridge sobre caracteristicas polinomicas de vuelta y contexto.
+    """Ridge regression on polynomial features of lap and context.
 
-    Es la formalizacion del modelo clasico de degradacion lineal, generosamente
-    ampliado con un termino cuadratico e interacciones vuelta-contexto para no
-    hacerlo de paja.
+    This is the formalisation of the classic linear degradation model,
+    generously extended with a quadratic term and lap-context interactions so it
+    is not a straw man.
     """
 
-    name = "Lineal (clasico)"
+    name = "Linear (classic)"
 
     def __init__(self, phys: PhysicsConfig, ridge: float = 1e-3):
         self.phys = phys
@@ -43,7 +43,7 @@ class LinearDegBaseline:
 
     @staticmethod
     def _features(tau: np.ndarray, context: np.ndarray) -> np.ndarray:
-        """Diseno: constante, tau, tau^2, contexto e interacciones con tau."""
+        """Design matrix: constant, tau, tau^2, context and its interactions with tau."""
         tau = tau.reshape(-1, 1)
         ctx = np.tile(np.asarray(context).reshape(1, -1), (tau.shape[0], 1))
         return np.hstack([np.ones_like(tau), tau, tau**2, ctx, tau * ctx])
@@ -61,7 +61,7 @@ class LinearDegBaseline:
 
     def predict_stint(self, context: np.ndarray, laps: np.ndarray) -> np.ndarray:
         if self.coef_ is None:
-            raise RuntimeError("Ajusta el modelo antes de predecir")
+            raise RuntimeError("Fit the model before predicting")
         tau = np.asarray(laps, dtype=float).ravel() / self.phys.lap_ref
         return self._features(tau, context) @ self.coef_
 
@@ -78,14 +78,13 @@ class _LSTMNet(nn.Module):
 
 
 class LSTMBaseline:
-    """Red recurrente sobre la secuencia de vueltas del stint.
+    """Recurrent network over the stint's lap sequence.
 
-    Entrada por vuelta: (tau, contexto). Salida: perdida de ritmo de esa vuelta.
-    Es el representante de los metodos de aprendizaje profundo puro citados en
-    el estado del arte.
+    Input per lap: (tau, context). Output: that lap's pace loss. It stands in
+    for the pure deep-learning methods cited in the state of the art.
     """
 
-    name = "LSTM (caja negra)"
+    name = "LSTM (black box)"
 
     def __init__(
         self,
@@ -106,7 +105,7 @@ class LSTMBaseline:
         self.history: list[float] = []
 
     def _sequences(self, data: StintDataset) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Empaqueta los stints en un tensor con relleno y mascara de validez."""
+        """Pack the stints into a padded tensor plus a validity mask."""
         max_len = max(s.n_laps for s in data.stints)
         n_feat = 1 + data.stints[0].context.size
         x = np.zeros((len(data.stints), max_len, n_feat), dtype=np.float32)
@@ -128,7 +127,7 @@ class LSTMBaseline:
         for _ in range(self.epochs):
             opt.zero_grad()
             pred = self.net(x)
-            # La perdida solo cuenta las vueltas reales, no el relleno.
+            # The loss only counts real laps, not the padding.
             loss = ((pred - y) ** 2 * mask).sum() / mask.sum()
             loss.backward()
             opt.step()
@@ -138,7 +137,7 @@ class LSTMBaseline:
 
     def predict_stint(self, context: np.ndarray, laps: np.ndarray) -> np.ndarray:
         if self.net is None:
-            raise RuntimeError("Ajusta el modelo antes de predecir")
+            raise RuntimeError("Fit the model before predicting")
         laps = np.asarray(laps, dtype=float).ravel()
         tau = (laps / self.phys.lap_ref).reshape(-1, 1)
         ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))

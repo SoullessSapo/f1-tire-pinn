@@ -1,49 +1,47 @@
-"""Modelo fisico del neumatico de F1.
+"""Physical model of an F1 tire.
 
-Sistema de dos EDOs adimensionales acopladas que describen la vida de un stint:
+Two coupled dimensionless ODEs describe the life of a stint:
 
     (E1)  dtheta/dtau = A_gen * q * (1 + zeta * d)  -  (h0 + h1 * v) * theta
     (E2)  dd/dtau     = kw * lam^m * exp(Ea * (theta + T_trk) - kappa * c) * (1 - d)
 
-con
+where
 
-    tau   = vuelta_del_stint / L_ref             tiempo adimensional
-    theta = (T_sup - T_pista) / dT_ref           exceso termico de la banda
-    d     = fraccion de banda de rodadura consumida (0 = nuevo, 1 = agotado)
-    q     = energia friccional especifica por vuelta (telemetria)
-    lam   = carga mecanica media en g (telemetria)
-    v     = velocidad media (enfriamiento convectivo forzado)
-    T_trk = temperatura de pista normalizada
-    c     = indice de dureza del compuesto (0 blando .. 1 duro)
+    tau   = stint_lap / L_ref                  dimensionless time
+    theta = (T_surface - T_track) / dT_ref     thermal excess of the tread
+    d     = fraction of tread consumed (0 = new, 1 = gone)
+    q     = specific frictional energy per lap (telemetry)
+    lam   = mean mechanical load in g (telemetry)
+    v     = mean speed (forced convective cooling)
+    T_trk = normalised track temperature
+    c     = compound hardness index (0 soft .. 1 hard)
 
-(E1) es un balance termico de capacitancia concentrada: generacion friccional
-menos decaimiento exponencial superficial (enfriamiento base + conveccion
-forzada). (E2) combina la ley de Archard (desgaste proporcional a la carga)
-con una activacion termica tipo Arrhenius linealizada alrededor de la ventana
-de trabajo: el desgaste crece exponencialmente con la temperatura.
+(E1) is a lumped-capacitance heat balance: frictional generation minus
+exponential surface decay (baseline cooling + forced convection). (E2) combines
+Archard's law (wear proportional to load) with an Arrhenius thermal activation
+linearised around the working window: wear grows exponentially with temperature.
 
-El factor (1 - d) de (E2) es un termino de saturacion: acota estructuralmente
-d en [0, 1] porque no se puede consumir mas banda de rodadura de la que hay.
-Es una hipotesis de modelado explicita, no una regularizacion numerica, y
-tiene la ventaja de que la propia EDO impone la cota fisica sobre la red.
+The (1 - d) factor in (E2) is a saturation term: it bounds d to [0, 1]
+structurally, because you cannot consume more tread than exists. It is an
+explicit modelling assumption rather than a numerical trick, and it has the
+advantage that the physical bound is enforced by the ODE itself.
 
-El factor (1 + zeta * d) de (E1) es el acoplamiento que produce el cliff: a
-medida que la banda se adelgaza, la misma energia friccional se deposita sobre
-menos masa de caucho, la temperatura superficial sube, y por Arrhenius el
-desgaste se acelera. Es una realimentacion positiva, de modo que el cliff
-emerge de la dinamica acoplada en lugar de imponerse a mano. Esta es
-justamente la clase de restriccion termodinamica que una LSTM no conoce.
+The (1 + zeta * d) factor in (E1) is the coupling that produces the cliff: as
+the tread thins, the same frictional energy is deposited into less rubber mass,
+surface temperature rises, and by Arrhenius wear accelerates. It is positive
+feedback, so the cliff emerges from the coupled dynamics instead of being
+imposed by hand. This is exactly the kind of thermodynamic constraint an LSTM
+has no way of knowing.
 
-El observable medible desde la telemetria no es d sino la perdida de ritmo:
+The measurable observable is not d but the pace loss:
 
     delta(tau) = gamma1 * d  +  gamma2 * d^p
 
-El primer termino es la degradacion lineal; el segundo, con p grande, es
-despreciable hasta que d se acerca a 1 y entonces explota: es el cliff.
+The first term is linear degradation; the second, with p large, is negligible
+until d approaches 1 and then explodes: that is the cliff.
 
-Las funciones aceptan tanto arrays de numpy como tensores de torch, de modo que
-el mismo codigo define la verdad de referencia (integracion numerica) y el
-residuo de la PINN.
+These functions accept both numpy arrays and torch tensors, so the same code
+defines the reference ground truth (numerical integration) and the PINN residual.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ import numpy as np
 
 from .config import PhysicsConfig
 
-try:  # torch solo hace falta al evaluar el residuo dentro de DeepXDE
+try:  # torch is only needed when evaluating the residual inside DeepXDE
     import torch
 except ImportError:  # pragma: no cover
     torch = None
@@ -88,7 +86,7 @@ def _relu(x):
 
 @dataclass
 class TireParams:
-    """Parametros fisicos del modelo, estimados por la PINN como problema inverso."""
+    """Physical model parameters, estimated by the PINN as an inverse problem."""
 
     A_gen: float
     zeta: float
@@ -104,7 +102,7 @@ class TireParams:
 
     @classmethod
     def from_config(cls, cfg: PhysicsConfig) -> TireParams:
-        """Valores iniciales declarados en la configuracion."""
+        """Initial values declared in the configuration."""
         return cls(
             A_gen=cfg.A_gen,
             zeta=cfg.zeta_init,
@@ -123,9 +121,9 @@ class TireParams:
         return asdict(self)
 
 
-# Verdad de referencia usada por el generador sintetico. Difiere a proposito de
-# los valores iniciales de PhysicsConfig: la PINN debe recuperarla desde los
-# datos, y esa recuperacion es la validacion del problema inverso.
+# Reference ground truth used by the synthetic generator. It differs from the
+# initial values in PhysicsConfig on purpose: the PINN has to *recover* it from
+# the data, and that recovery is what validates the inverse problem.
 GROUND_TRUTH = TireParams(
     A_gen=8.0,
     zeta=0.90,
@@ -142,39 +140,39 @@ GROUND_TRUTH = TireParams(
 
 
 # --------------------------------------------------------------------------
-# Terminos del sistema
+# Terms of the system
 # --------------------------------------------------------------------------
 def theta_rhs(theta, d, q, v, p: TireParams):
-    """Lado derecho de (E1): generacion friccional menos decaimiento termico.
+    """Right-hand side of (E1): frictional generation minus thermal decay.
 
-    El factor (1 + zeta * d) concentra la energia friccional sobre una banda de
-    rodadura cada vez mas delgada: es el motor del cliff.
+    The (1 + zeta * d) factor concentrates the frictional energy into an ever
+    thinner tread: it is what drives the cliff.
     """
     return p.A_gen * q * (1.0 + p.zeta * d) - (p.h0 + p.h1 * v) * theta
 
 
 def wear_rate(theta, d, lam, track_temp, compound, p: TireParams, exp_clamp: float = 6.0):
-    """Lado derecho de (E2): tasa de desgaste Archard por Arrhenius, con saturacion.
+    """Right-hand side of (E2): Archard times Arrhenius wear, with saturation.
 
-    Es no negativa mientras d <= 1, asi que la monotonia del desgaste
-    (dd/dtau >= 0) y la cota d <= 1 quedan implicadas por el propio residuo de
-    la EDO, sin necesidad de restricciones adicionales sobre la red.
+    It is non-negative while d <= 1, so monotonic wear (dd/dtau >= 0) and the
+    bound d <= 1 are both implied by the ODE residual itself, with no extra
+    constraints on the network.
     """
     expo = _clamp_max(p.Ea * (theta + track_temp) - p.kappa * compound, exp_clamp)
     return p.kw * _pow(lam, p.m) * _exp(expo) * _relu(1.0 - d)
 
 
 def pace_loss(d, p: TireParams):
-    """Observable: perdida de ritmo en segundos frente al mejor ritmo del stint.
+    """Observable: pace loss in seconds relative to the stint's best lap.
 
-    Con d acotada en [0, 1] por (E2), la perdida maxima es gamma1 + gamma2.
+    With d bounded to [0, 1] by (E2), the maximum loss is gamma1 + gamma2.
     """
     d = _clamp_max(_relu(d), 1.0)
     return p.gamma1 * d + p.gamma2 * _pow(d, p.p)
 
 
 # --------------------------------------------------------------------------
-# Integracion de referencia (numpy): genera la verdad de un stint
+# Reference integration (numpy): generates the ground truth of a stint
 # --------------------------------------------------------------------------
 def integrate_stint(
     n_laps: int,
@@ -183,19 +181,19 @@ def integrate_stint(
     phys: PhysicsConfig,
     steps_per_lap: int = 8,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Integra (E1)-(E2) con Runge-Kutta 4 sobre un stint completo.
+    """Integrate (E1)-(E2) with Runge-Kutta 4 over a full stint.
 
     Args:
-        n_laps: numero de vueltas del stint.
+        n_laps: number of laps in the stint.
         context: vector (q_fric, load, speed, track_temp, compound).
-        p: parametros fisicos.
-        phys: escalas de adimensionalizacion.
-        steps_per_lap: subdivision temporal del integrador.
+        p: physical parameters.
+        phys: non-dimensionalisation scales.
+        steps_per_lap: time subdivision of the integrator.
 
     Returns:
-        laps: vueltas 1..n_laps.
-        theta: exceso termico al final de cada vuelta.
-        d: degradacion acumulada al final de cada vuelta.
+        laps: laps 1..n_laps.
+        theta: thermal excess at the end of each lap.
+        d: accumulated degradation at the end of each lap.
     """
     q, lam, v, trk, comp = (float(c) for c in context)
     dt = 1.0 / (phys.lap_ref * steps_per_lap)
@@ -226,7 +224,7 @@ def integrate_stint(
 
 
 # --------------------------------------------------------------------------
-# Post-proceso: cliff y vida util remanente
+# Post-processing: cliff and remaining useful life
 # --------------------------------------------------------------------------
 def cliff_lap(
     laps: np.ndarray,
@@ -234,16 +232,17 @@ def cliff_lap(
     phys: PhysicsConfig,
     smooth: bool = True,
 ) -> float | None:
-    """Primera vuelta en la que la curva de ritmo entra en el cliff.
+    """First lap at which the pace curve enters the cliff.
 
-    Criterio operativo: la pendiente de la perdida de ritmo supera el umbral
-    cliff_slope_s_per_lap. Devuelve None si el stint termina antes del cliff.
+    Operational criterion: the slope of the pace loss exceeds the
+    cliff_slope_s_per_lap threshold. Returns None if the stint ends before the
+    cliff.
 
-    Se suaviza con una media movil de tres vueltas antes de derivar. Sin eso, el
-    ruido de cronometraje de una curva real (unas decimas de segundo) domina la
-    derivada y dispara falsos cliffs. Es el mismo criterio para la verdad
-    observada y para la prediccion de cualquier modelo, que es lo que hace
-    comparable la metrica.
+    The curve is smoothed with a three-lap moving average before
+    differentiating. Without that, the timing noise of a real curve (a few
+    tenths of a second) dominates the derivative and triggers false cliffs. The
+    same criterion is applied to the observed ground truth and to any model's
+    prediction, which is what makes the metric comparable.
     """
     laps = np.asarray(laps, dtype=float)
     delta = np.asarray(delta, dtype=float)
@@ -260,9 +259,8 @@ def cliff_lap(
     return float(laps[hit[0]])
 
 
-
 def remaining_useful_life(current_lap: float, cliff: float | None, horizon: float) -> float:
-    """RUL en vueltas. Si no se detecta cliff, se acota con el horizonte dado."""
+    """RUL in laps. If no cliff is detected, it is capped by the given horizon."""
     if cliff is None:
         return float(max(horizon - current_lap, 0.0))
     return float(max(cliff - current_lap, 0.0))
