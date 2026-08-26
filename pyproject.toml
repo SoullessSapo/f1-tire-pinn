@@ -1,0 +1,14 @@
+[project]
+name = "f1-tire-pinn"
+version = "0.1.0"
+description = "Physics-Informed Neural Network para degradacion de neumaticos de F1"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# E501: las lineas largas son casi todas comentarios explicativos y tablas.
+ignore = ["E501"]

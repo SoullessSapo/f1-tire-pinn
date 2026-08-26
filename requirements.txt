@@ -1,0 +1,12 @@
+# Backend de DeepXDE. En Windows/CPU instalar con:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.0
+
+deepxde>=1.13
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.7
+
+# Solo necesario para --source fastf1
+fastf1>=3.3

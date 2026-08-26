@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Cache de FastF1: ~200 MB de telemetria descargada, se regenera sola
+cache/
+
+# Directorios de pruebas rapidas (outputs/_quick, outputs/_verify, ...)
+outputs/_*/
