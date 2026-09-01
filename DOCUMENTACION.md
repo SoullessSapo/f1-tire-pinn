@@ -1,7 +1,7 @@
 # F1 Tire PINN — Guía completa del proyecto
 
 **Autor:** Esteban Valencia
-**Repositorio:** https://github.com/SoullessSapo/F1-CNN-IA
+**Repositorio:** https://github.com/SoullessSapo/f1-tire-pinn
 **Alcance:** la red neuronal y el uso de DeepXDE. La capa cloud de AWS **no** está incluida.
 
 > *El código y el README están en inglés; este documento está en español a propósito.*
