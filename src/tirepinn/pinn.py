@@ -85,10 +85,14 @@ LEARNABLE = LEARNABLE_PARAMS
 def _to_raw(name: str, value: float, cfg) -> float:
     """From a physical value to the unconstrained variable the network optimises.
 
-    The ODE parameters only need to be positive, so they are parametrised in log
-    space. The observable ones (gamma1, gamma2) additionally carry an upper
-    bound, because they are the degenerate direction of the problem: they are
-    mapped with a sigmoid into their physical range.
+    Two regimes, chosen per parameter by whether it declares `<name>_bounds`:
+
+    - No bounds: log parametrisation, so the value is positive by construction.
+      That is what most ODE coefficients require -- there is no such thing as a
+      negative cooling coefficient or a negative wear rate.
+    - With bounds: sigmoid into the declared range. Used by gamma1/gamma2,
+      because they are the degenerate direction of the problem, and by kappa,
+      whose sign is genuinely free (see `PhysicsConfig.kappa_bounds`).
     """
     bounds = getattr(cfg, f"{name}_bounds", None)
     if bounds is None:

@@ -55,6 +55,13 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--lbfgs", type=int, default=3000)
     g.add_argument("--lstm-epochs", type=int, default=800)
     g.add_argument("--no-baselines", action="store_true")
+    g.add_argument(
+        "--free-params",
+        nargs="+",
+        default=None,
+        help="physical parameters to estimate on real data. Defaults to "
+        "config.REAL_DATA_FREE_PARAMS; more data allows freeing more of them.",
+    )
     return p.parse_args()
 
 
@@ -78,10 +85,14 @@ def build_config(args: argparse.Namespace) -> Config:
         # ground truth exists; on real telemetry only the quantities that change
         # between circuits or tire batches are fitted.
         # See config.REAL_DATA_FREE_PARAMS for the full argument.
+        free = tuple(args.free_params) if args.free_params else REAL_DATA_FREE_PARAMS
+        unknown = set(free) - set(LEARNABLE)
+        if unknown:
+            raise SystemExit(f"unknown parameters in --free-params: {sorted(unknown)}")
         for name in LEARNABLE:
-            if name not in REAL_DATA_FREE_PARAMS:
+            if name not in free:
                 setattr(cfg.physics, f"{name}_init", float(getattr(GROUND_TRUTH, name)))
-        cfg.pinn.free_params = REAL_DATA_FREE_PARAMS
+        cfg.pinn.free_params = free
 
         # The weight of the data term should scale with data quality. Synthetic
         # timing has sigma ~0.06 s, so its term drops to ~0.004 and stops pulling

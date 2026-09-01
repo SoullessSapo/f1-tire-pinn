@@ -30,6 +30,7 @@ entrar a las decisiones concretas.
 | **11** | Resultados |
 | **12** | Limitaciones y siguientes pasos |
 | **13** | Verificación contra datos publicados independientes |
+| **14** | La temporada 2026 completa: 432 stints |
 
 ---
 
@@ -905,7 +906,95 @@ de 2023.
 
 ---
 
-# 14. Cómo reproducirlo
+# 14. La temporada 2026 completa
+
+Después corrí el modelo contra una temporada moderna entera: **11 carreras de
+2026, 432 stints, 8 192 vueltas** (324 entrenamiento / 108 prueba). Mónaco queda
+fuera — tras los filtros de bandera verde y vueltas de boxes no deja ni un stint
+de 8 vueltas limpias.
+
+Hizo falta un cambio. La ley de desgaste lleva el compuesto como `exp(−κ·c)`, y
+`κ` estaba parametrizada en logaritmo, así que `κ > 0` siempre y un compuesto más
+duro necesariamente se desgastaba menos. Las cifras publicadas de 2026 afirman
+que la jerarquía se invirtió, y el modelo era **estructuralmente incapaz** de
+expresarlo. Ahora `κ` usa la parametrización acotada con sigmoide sobre un rango
+simétrico `[−1.5, +1.5]`, de modo que **su signo lo decide el dato, no la
+parametrización**.
+
+## 14.1 La jerarquía de compuestos NO se invirtió
+
+Midiendo la degradación igual que el análisis publicado —ajuste lineal de la
+pérdida de ritmo corregida por combustible contra la vuelta del stint:
+
+| Compuesto | n | Medido 2026 | Publicado 2026 |
+|---|---|---|---|
+| DURO | 225 | 0.0764 s/vuelta | 0.071 |
+| MEDIO | 166 | 0.0808 s/vuelta | 0.065 |
+| BLANDO | 41 | 0.0808 s/vuelta | 0.063 |
+
+El orden agrupado sale casi plano y **no** reproduce la inversión publicada.
+Controlando por circuito el panorama cambia por completo:
+
+| | DURO − MEDIO |
+|---|---|
+| Agrupando todos los circuitos | −0.004 s/vuelta (casi plano) |
+| **Dentro del mismo circuito** | **−0.027 s/vuelta** (orden clásico, claro) |
+
+Solo 3 de 10 circuitos muestran el duro degradándose más rápido. **El compuesto
+está confundido con el circuito**: las tasas por circuito van de 0.02 (Mónaco) a
+0.157 (Barcelona), un rango 7× mayor que el efecto de compuesto, y los duros se
+usan justo en los circuitos degradantes — Barcelona tiene 34 stints de duro,
+Mónaco ninguno. Agrupar sin controlar infla la tasa aparente del duro,
+exactamente en la dirección que fabricaría una inversión.
+
+El `κ = +0.436` ajustado coincide: positivo, orden clásico, y eso que las cotas
+le permitían irse a negativo. La PINN controla el confundido por construcción,
+porque su vector de contexto ya lleva `q_fric`, `load` y `track_temp` — así que
+su `κ` es el efecto dentro de condiciones comparables.
+
+Esto es un desacuerdo con la fuente publicada, y lo planteo como **hipótesis, no
+como corrección**: no tengo su metodología, así que el confundido es una
+explicación plausible de la discrepancia, no una demostrada.
+
+## 14.2 Precisión: más datos acercaron la brecha pero no la cerraron
+
+| Modelo | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
+|---|---|---|---|---|
+| PINN | 0.964 | 0.659 | 5.7 % | 7.4 % |
+| Lineal (clásico) | 0.796 | 0.567 | 0.8 % | 4.0 % |
+| LSTM (caja negra) | **0.768** | **0.539** | 4.7 % | 5.9 % |
+
+Un oráculo que ajusta una recta distinta a cada stint *de prueba* saca 0.538 s,
+así que ése es el suelo de ruido irreducible. Los tres modelos quedan dentro de
+1.5× de ese suelo.
+
+**Mi predicción de que más carreras dejarían ganar a la PINN se puso a prueba y
+no se cumplió.** Con 12× más datos la brecha relativa sí se cerró bastante —de
+2.2× peor que el mejor baseline con dos carreras de 2023, a 1.26× aquí— pero la
+PINN sigue perdiendo.
+
+Liberar más parámetros tampoco la rescata. Con `m` y `E_a` también libres el
+ajuste mejora un poco (RMSE 0.925) pero la física colapsa: `m = 0.010` (sin
+dependencia de carga), `E_a = 0.174` (casi sin activación térmica), `κ = 0.012`
+(sin efecto de compuesto). Es la misma patología del problema 3 —la red apagando
+la física para ajustar— así que me quedo con la configuración de dos parámetros.
+
+El fichero `outputs/2026/06_cliff_map.png` enseña el precio sin adornos: a
+diferencia del mapa sintético, la superficie de decisión de 2026 no es monótona
+ni en carga ni en temperatura, con manchas de desgaste temprano en zonas frías y
+de baja carga. El modelo no aprendió una respuesta a las condiciones que sea de
+fiar.
+
+## 14.3 Conclusión honesta para 2026
+
+El pipeline escala a una temporada completa y el problema inverso devuelve **un
+resultado genuinamente útil y verificable desde fuera**: el orden de compuestos y
+su confundido con el circuito. Como predictor de pérdida de ritmo, sigue
+perdiendo contra una recta.
+
+---
+
+# 15. Cómo reproducirlo
 
 ```
 python -m venv .venv
@@ -916,7 +1005,8 @@ set DDE_BACKEND=pytorch
 
 python run_train.py --source synthetic --stints 64          # ~30 min
 python run_train.py --source synthetic --quick              # ~2 min, valida el pipeline
-python run_train.py --source fastf1 --gp Monza Hungary      # telemetría real
+python run_train.py --source fastf1 --gp Monza Hungary      # telemetría real 2023
+python run_train.py --source fastf1 --year 2026 --gp Melbourne Suzuka Barcelona Budapest   # 2026
 python run_infer.py --compound SOFT --track-temp 0.8        # inferencia + latencia
 ```
 

@@ -24,8 +24,11 @@ without correcting for it degradation is completely masked.
 
 from __future__ import annotations
 
+import hashlib
+import pickle
 from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -322,7 +325,41 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
     )
 
 
-def build_multi_dataset(cfg: DataConfig, phys: PhysicsConfig, gps: Sequence[str]) -> StintDataset:
+def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
+    """Cache file for one (year, session, races) combination.
+
+    Keyed by a hash of everything that changes the result, so a config change
+    silently invalidates the cache instead of returning a stale dataset.
+
+    Caching happens **per race**, not only for the combined set. Parsing one
+    season takes the better part of an hour, and caching only the final result
+    means any interruption throws all of it away. With per-race entries a run
+    can be stopped and resumed, and adding a race to the list only costs that
+    race.
+    """
+    key = repr(
+        (
+            cfg.year,
+            cfg.session,
+            tuple(gps),
+            tuple(cfg.drivers),
+            cfg.fuel_effect_s_per_lap,
+            cfg.q_fric_ref,
+            cfg.load_ref,
+            cfg.speed_ref,
+            cfg.min_stint_laps,
+            cfg.ref_window,
+            cfg.max_delta_s,
+            cfg.only_fresh_tyres,
+        )
+    )
+    digest = hashlib.sha1(key.encode()).hexdigest()[:12]
+    return Path(cfg.cache_dir) / "datasets" / f"{cfg.year}-{cfg.session}-{len(gps)}races-{digest}.pkl"
+
+
+def build_multi_dataset(
+    cfg: DataConfig, phys: PhysicsConfig, gps: Sequence[str], use_cache: bool = True
+) -> StintDataset:
     """Combine several races into a single dataset.
 
     This is the recommended way to train on real data. Within a single race the
@@ -330,17 +367,41 @@ def build_multi_dataset(cfg: DataConfig, phys: PhysicsConfig, gps: Sequence[str]
     cannot learn how degradation responds to conditions: it only sees the effect
     of compound and time. With several races the context space is genuinely
     populated.
+
+    Parsing telemetry is by far the slowest step -- minutes per race, since every
+    lap is fetched and differentiated individually. The assembled dataset is
+    cached to disk so that retraining, or changing a network hyperparameter, does
+    not pay that cost again.
     """
+    cache_path = _dataset_cache_path(cfg, gps)
+    if use_cache and cache_path.exists():
+        with open(cache_path, "rb") as fh:
+            data = pickle.load(fh)
+        print(f"  [cache] {len(data)} stints read from {cache_path.name}")
+        return data
+
     all_stints: list[Stint] = []
     sources, failures = [], []
 
-    for gp in gps:
+    for i, gp in enumerate(gps, 1):
         race_cfg = replace(cfg, gp=gp)
-        try:
-            part = build_dataset(race_cfg, phys)
-        except Exception as exc:
-            failures.append(f"{gp}: {exc}")
-            continue
+        race_cache = _dataset_cache_path(race_cfg, [gp])
+        if use_cache and race_cache.exists():
+            with open(race_cache, "rb") as fh:
+                part = pickle.load(fh)
+            print(f"  [{i}/{len(gps)}] {gp}: {len(part.stints)} stints (cached)")
+        else:
+            try:
+                part = build_dataset(race_cfg, phys)
+            except Exception as exc:
+                failures.append(f"{gp}: {exc}")
+                print(f"  [{i}/{len(gps)}] {gp}: FAILED ({exc})")
+                continue
+            if use_cache:
+                race_cache.parent.mkdir(parents=True, exist_ok=True)
+                with open(race_cache, "wb") as fh:
+                    pickle.dump(part, fh)
+            print(f"  [{i}/{len(gps)}] {gp}: {len(part.stints)} stints")
         for stint in part.stints:
             stint.stint_id = f"{gp[:3].upper()}-{stint.stint_id}"
         all_stints.extend(part.stints)
@@ -349,8 +410,13 @@ def build_multi_dataset(cfg: DataConfig, phys: PhysicsConfig, gps: Sequence[str]
     if not all_stints:
         raise RuntimeError("No race produced valid stints:\n  " + "\n  ".join(failures))
 
-    return StintDataset(
+    data = StintDataset(
         stints=all_stints,
         source=" + ".join(sources),
         meta={"races": list(gps), "failures": failures},
     )
+    if use_cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as fh:
+            pickle.dump(data, fh)
+    return data

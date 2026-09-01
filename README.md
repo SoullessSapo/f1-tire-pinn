@@ -500,7 +500,90 @@ here because this project targets 2023 data.
 
 ---
 
-## 9. Evaluation
+## 9. The 2026 season
+
+The model was then run against a full modern season: **11 races of 2026, 432
+stints, 8 192 laps** (324 train / 108 test). Monaco is excluded — after the
+green-flag and pit-lap filters it yields no stint of 8 clean laps.
+
+This required one change. The wear law carries the compound as `exp(-κ·c)`, and
+`κ` was log-parametrised, so `κ > 0` always and a harder compound necessarily
+wore less. Published figures for 2026 claim the hierarchy inverted, which the
+model was structurally unable to express. `κ` now uses the bounded sigmoid
+parametrisation instead, over a symmetric `[-1.5, +1.5]`, so **its sign is
+decided by the data rather than by the parametrisation**.
+
+### The compound hierarchy did not invert
+
+Measuring degradation the same way as the published analysis — linear fit of
+fuel-corrected pace loss against stint lap — gives:
+
+| Compound | n | Measured 2026 | Published 2026 |
+|---|---|---|---|
+| HARD | 225 | 0.0764 s/lap | 0.071 |
+| MEDIUM | 166 | 0.0808 s/lap | 0.065 |
+| SOFT | 41 | 0.0808 s/lap | 0.063 |
+
+The pooled ordering is nearly flat and does **not** reproduce the published
+reversal. Controlling for circuit changes the picture completely:
+
+| | HARD − MEDIUM |
+|---|---|
+| Pooled across circuits | −0.004 s/lap (nearly flat) |
+| **Within the same circuit** | **−0.027 s/lap** (classic ordering, clear) |
+
+Only 3 of 10 circuits show hard degrading faster. **Compound is confounded with
+circuit**: per-circuit rates span 0.02 (Monaco) to 0.157 (Barcelona), a 7× range
+that dwarfs the compound effect, and hards are run precisely at the degrading
+circuits — Barcelona has 34 hard stints, Monaco none. Pooling without
+controlling inflates hard's apparent rate, in exactly the direction that would
+manufacture a reversal.
+
+The fitted `κ = +0.436` agrees: positive, the classic ordering, even though the
+bounds allowed it to go negative. The PINN controls the confound by
+construction, because its context vector already carries `q_fric`, `load` and
+`track_temp` — so its `κ` is the within-circuit effect.
+
+This is a disagreement with the published source, offered as a hypothesis rather
+than a correction: the article's methodology is not available here, so the
+confound is a plausible explanation for the discrepancy, not a demonstrated one.
+
+### Accuracy: more data narrowed the gap but did not close it
+
+| Model | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
+|---|---|---|---|---|
+| PINN | 0.964 | 0.659 | 5.7 % | 7.4 % |
+| Linear (classic) | 0.796 | 0.567 | 0.8 % | 4.0 % |
+| LSTM (black box) | **0.768** | **0.539** | 4.7 % | 5.9 % |
+
+An oracle that fits a separate straight line to each *test* stint scores 0.538 s,
+so that is the irreducible noise floor. Every model sits within 1.5× of it.
+
+**The earlier prediction that more races would let the PINN win was tested and
+did not hold.** With 12× more data the relative gap did close substantially —
+from 2.2× worse than the best baseline on two 2023 races to 1.26× here — but the
+PINN still loses.
+
+Freeing more parameters does not rescue it either. With `m` and `E_a` also free
+the fit improves slightly (RMSE 0.925) but the physics collapses: `m = 0.010`
+(no load dependence), `E_a = 0.174` (almost no thermal activation), `κ = 0.012`
+(no compound effect). That is the same pathology documented in problem 3 — the
+network switching the physics off to fit — so the two-parameter configuration is
+the one kept.
+
+`outputs/2026/06_cliff_map.png` shows the cost plainly: unlike the synthetic
+map, the 2026 decision surface is not monotone in load or temperature, with
+early-wear patches in cool low-load regions. The model has not learned a
+trustworthy response to conditions from this data.
+
+**Honest bottom line for 2026:** the pipeline scales to a full season and the
+inverse problem returns one genuinely useful, externally checkable result — the
+compound ordering and its confound. As a predictor of pace loss it is still
+beaten by a straight line.
+
+---
+
+## 10. Evaluation
 
 Three dimensions, because they answer different questions:
 
@@ -522,7 +605,7 @@ information from the same stint between train and test.
 
 ---
 
-## 10. Structure
+## 11. Structure
 
 ```
 src/tirepinn/
@@ -545,7 +628,7 @@ substantive problems found during development is in
 
 ---
 
-## 11. References
+## 12. References
 
 - Raissi, Perdikaris & Karniadakis (2019). *Physics-informed neural networks*.
   Journal of Computational Physics, 378, 686–707.

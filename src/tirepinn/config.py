@@ -112,6 +112,20 @@ class PhysicsConfig:
     gamma1_bounds: tuple[float, float] = (0.2, 4.0)   # [s]
     gamma2_bounds: tuple[float, float] = (0.2, 6.0)   # [s]
 
+    # kappa is the one physical coefficient whose SIGN is not fixed by physics.
+    # It says how much a harder compound resists wear, via exp(-kappa*c) with
+    # c = 0 soft, 1 hard. Positive kappa means the classic ordering, harder wears
+    # less. That held through 2025, but in 2026 the hierarchy inverted: hard
+    # degrades fastest (0.071 s/lap) and soft slowest (0.063). Verified in the
+    # data too -- Australia 2026 gives HARD 0.071 against MEDIUM 0.018.
+    #
+    # Log-parametrising kappa, as the other ODE coefficients are, would force
+    # kappa > 0 and make the model structurally incapable of fitting 2026. It is
+    # given symmetric bounds instead, so it may go negative. |kappa| <= 1.5 caps
+    # the soft-to-hard wear ratio at e^1.5 ~ 4.5x in either direction, which is
+    # generous. Unlike a cooling coefficient, nothing physical demands kappa > 0.
+    kappa_bounds: tuple[float, float] = (-1.5, 1.5)
+
     # --- pace-loss observable ---
     cliff_exponent: float = 8.0    # p in delta = g1*d + g2*d^p
 
