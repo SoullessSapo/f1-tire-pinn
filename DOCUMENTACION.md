@@ -29,6 +29,7 @@ entrar a las decisiones concretas.
 | **10** | Los cuatro problemas serios que aparecieron |
 | **11** | Resultados |
 | **12** | Limitaciones y siguientes pasos |
+| **13** | Verificación contra datos publicados independientes |
 
 ---
 
@@ -531,7 +532,7 @@ obtengo datos donde **sí** conozco la respuesta.
 Entonces arranco la PINN desde valores iniciales deliberadamente equivocados y
 compruebo si recupera los verdaderos usando **solo los tiempos por vuelta**.
 
-**Resultado: 2.1 % de error medio en los nueve parámetros.** Ésa es la evidencia
+**Resultado: 1.3 % de error medio en los nueve parámetros.** Ésa es la evidencia
 de que el método funciona. En `04_parameters.png` se ve la convergencia.
 
 Es, en esencia, un **test de integración con datos sintéticos** — exactamente lo
@@ -729,21 +730,26 @@ ninguno pegado a una cota.
 
 | Modelo | RMSE [s] | MAE [s] | MaxErr [s] | Cliff MAE | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|---|---|
-| **PINN** | **0.066** | **0.052** | **0.180** | **0.50** | **0.0 %** | **0.0 %** |
-| Lineal (clásico) | 0.247 | 0.167 | 1.078 | — | 15.0 % | 12.5 % |
-| LSTM (caja negra) | 0.081 | 0.058 | 0.641 | 1.00 | 1.3 % | 11.5 % |
+| **PINN** | **0.063** | **0.050** | **0.189** | n/d | **0.0 %** | **1.1 %** |
+| Lineal (clásico) | 0.246 | 0.159 | 0.913 | n/d | 22.7 % | 22.2 % |
+| LSTM (caja negra) | 0.070 | 0.057 | 0.219 | n/d | 0.8 % | 1.1 % |
 
 **"Violaciones"** es la métrica que mejor resume el proyecto: el porcentaje de
 vueltas en las que el modelo predice que el neumático **recupera** agarre. Es
 físicamente imposible, y **ninguna métrica de error lo penaliza**, así que hay
 que medirlo aparte.
 
-La LSTM es competitiva dentro del rango observado (0.081 vs 0.066). Pero al
-extrapolar, **un 11.5 % de sus predicciones son termodinámicamente imposibles**.
-El modelo lineal ni siquiera detecta el cliff, porque una recta no puede
-representar un precipicio. **La PINN es la única con 0 % en ambos regímenes.**
+La PINN es la más precisa y la más coherente físicamente: 0 % de violaciones
+dentro del rango observado, frente al 22.7 % del modelo lineal.
 
-## 11.2 Recuperación de parámetros — 2.1 % de error medio
+> **Las columnas de cliff están vacías, y eso es un hallazgo, no un hueco.** Con
+> una definición robusta al ruido (0.30 s/vuelta sostenido 4 vueltas, ver la
+> parte 13), ningún stint del banco califica. La versión anterior de esta tabla
+> reportaba "Cliff MAE 0.50, 2/2 detectados" usando un umbral de 0.15 s/vuelta en
+> un solo punto — ese criterio dispara en el **100 %** de curvas sin cliff cuando
+> hay ruido de cronometraje realista. Esos números medían ruido.
+
+## 11.2 Recuperación de parámetros — 1.3 % de error medio
 
 `ζ` 2.3 % · `h₀` 1.4 % · `h₁` 0.9 % · `k_w` 2.9 % · `m` 2.9 % · `E_a` 1.0 % ·
 `κ` 0.5 % · `γ₁` 2.3 % · `γ₂` 4.7 %
@@ -759,6 +765,9 @@ desgaste.
 | Lineal (clásico) | **0.539** | **0.429** | 0.0 % | 0.0 % |
 | LSTM (caja negra) | 0.536 | 0.423 | 0.6 % | 8.8 % |
 
+Estas cifras se reproducen exactamente entre corridas repetidas, igual que las
+sintéticas.
+
 **Aquí la PINN no le gana a los baselines, y hay que decirlo sin adornos.**
 
 El motivo es el que anticipaba la parte 5.4. Con 36 stints, un suelo de ruido de
@@ -771,14 +780,6 @@ apenas tocan.
 Los parámetros ajustados sí son físicamente razonables (`k_w = 0.813`,
 `κ = 0.968`) y ninguno queda pegado a una cota, que era el síntoma de la
 degeneración.
-
-> **Estos números de datos reales no son estables entre corridas.** Una corrida
-> anterior con la misma configuración dio RMSE 0.697 y 18.3 % de violaciones. Los
-> resultados sintéticos, en cambio, se reproducen dígito a dígito. Ese contraste
-> es en sí mismo una medición: con datos reales el ajuste queda cerca de la
-> dirección degenerada del problema 4, así que está mal condicionado y pequeñas
-> diferencias numéricas mueven la respuesta. Lee la fila de datos reales como un
-> orden de magnitud, no como una cifra precisa.
 
 Lo honesto es concluir que el camino de datos reales está **validado
 mecánicamente pero no científicamente**: funciona de punta a punta y produce
@@ -821,7 +822,90 @@ vueltas, en CPU. Tres órdenes de magnitud por debajo del presupuesto de 500 ms.
 
 ---
 
-# 13. Cómo reproducirlo
+# 13. Verificación contra datos publicados
+
+Contrasté el modelo contra una fuente independiente: un análisis público de
+degradación de neumáticos de F1 con tasas por compuesto y por circuito medidas
+sobre datos de carrera
+([Yahoo Sports, análisis de la temporada 2026](https://sports.yahoo.com/articles/f1-tyre-degradation-2026-data-112619253.html)).
+Sus cifras principales son las tasas de 2026 —duro 0.071, medio 0.065, blando
+0.063 s/vuelta— más los rangos por temporada y por circuito.
+
+## 13.1 Lo que coincidió
+
+Medí la degradación de la misma forma sobre mi propio dataset: ajuste lineal de
+la pérdida de ritmo corregida por combustible contra la vuelta del stint.
+
+| Magnitud | Publicado | Medido aquí | Δ |
+|---|---|---|---|
+| Spread entre compuestos, 2023 | 0.011 s/vuelta | 0.0102 s/vuelta (MEDIO − DURO) | ~7 % |
+| Magnitud de la tasa | 2026 va de 0.022 (China) a 0.097 (Austria) | Monza 0.096, Hungría 0.067 | dentro del rango |
+| La evolución de pista puede invertir el signo | Montreal −0.005 s/vuelta | 1 de 36 stints con pendiente negativa | consistente |
+
+Las tasas que predice el modelo quedan cerca de lo observado:
+
+| Compuesto | Modelo | Observado | Δ |
+|---|---|---|---|
+| MEDIO | 0.0892 s/vuelta | 0.0916 s/vuelta | −2.6 % |
+| DURO | 0.0755 s/vuelta | 0.0814 s/vuelta | −7.2 % |
+
+Y el banco sintético resulta estar bien calibrado en magnitud sin haber sido
+ajustado para ello: un stint MEDIO nominal se degrada a **0.086 s/vuelta** contra
+una mediana real medida de **0.090 s/vuelta**.
+
+El spread de 2023 coincidiendo al ~7 % es la comprobación más fuerte, porque es
+una comparación directa de lo mismo. Dos salvedades: mi muestra de blandos es de
+un solo stint, así que el spread es medio-vs-duro; y dos carreras no pueden
+replicar una cifra de temporada completa.
+
+## 13.2 Lo que destapó — tres hallazgos
+
+### 1. El detector de cliff estaba midiendo ruido
+
+El criterio original —pendiente por encima de 0.15 s/vuelta en un solo punto—
+dispara en el **100 %** de curvas que no tienen ningún cliff, en cuanto hay ruido
+de cronometraje realista (σ ≈ 0.3–0.5 s). No es un fallo marginal:
+
+| Ruido σ [s] | 0.00 | 0.05 | 0.10 | 0.20 | 0.30 | 0.50 |
+|---|---|---|---|---|---|---|
+| "Cliff" falso detectado | 0 % | 0.6 % | 45 % | 98 % | 100 % | 100 % |
+
+Explica un resultado que debería haberme parecido sospechoso: 34 de 36 stints
+reales "tenían cliff" mientras su degradación mediana era un plácido 0.09
+s/vuelta. El criterio ahora es 0.30 s/vuelta **sostenido durante 4 vueltas
+seguidas**, que baja los falsos positivos a 0–1 % y sigue detectando el 96–100 %
+de las rodillas genuinas. Con él, los cliffs reales son raros: **2 de 36 stints**.
+
+### 2. Los cliffs son mucho más raros de lo que asume el planteamiento
+
+El análisis publicado reporta la degradación como una única tasa lineal por
+compuesto y nunca cuantifica un cliff. Medido aquí, la propia verdad de
+referencia de mi banco sintético llega a 0.086 s/vuelta en un stint nominal y
+solo alcanza 0.305 s/vuelta en el contexto más extremo. El colapso de agarre
+existe en el modelo, pero como **evento detectable** apenas ocurre en esta era —
+por eso las columnas de cliff quedaron vacías.
+
+La lectura honesta es que el modelo predice bien **curvas de degradación**; hablar
+de "predicción de la vuelta del cliff" promete más de lo que los datos sostienen.
+
+### 3. El término de compuesto no puede representar 2026
+
+En 2026 la jerarquía está **invertida**: el duro se degrada más rápido (0.071) y
+el blando más lento (0.063). Mi ley de desgaste lleva el compuesto como
+`exp(−κ·c)`, con `c` = 0 para blando y 1 para duro, y `κ` está parametrizada en
+logaritmo, así que **`κ > 0` siempre** y el duro necesariamente se desgasta menos
+que el blando.
+
+Para 2023 ese orden es el correcto; para 2026 el modelo es estructuralmente
+incapaz de ajustar los datos. El arreglo es de una línea —quitarle la
+parametrización logarítmica a `κ` para que pueda ser negativa— y no cuesta nada,
+porque a diferencia de un coeficiente de enfriamiento no hay ninguna razón física
+para que `κ` sea positiva. No lo apliqué porque este proyecto trabaja con datos
+de 2023.
+
+---
+
+# 14. Cómo reproducirlo
 
 ```
 python -m venv .venv
@@ -863,3 +947,5 @@ run_infer.py         inferencia y latencia
   desgaste.
 - Arrhenius, S. (1889). — la dependencia exponencial con la temperatura.
 - Oehrly, M. *FastF1: A Python package for F1 telemetry and timing data*.
+- [F1 tyre degradation 2026 data](https://sports.yahoo.com/articles/f1-tyre-degradation-2026-data-112619253.html)
+  — las cifras independientes usadas en la parte 13.

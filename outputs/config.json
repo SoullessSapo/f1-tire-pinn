@@ -24,7 +24,8 @@
       6.0
     ],
     "cliff_exponent": 8.0,
-    "cliff_slope_s_per_lap": 0.15,
+    "cliff_slope_s_per_lap": 0.3,
+    "cliff_min_run": 4,
     "d_crit": 0.85,
     "strategy_horizon": 45,
     "exp_clamp": 6.0

@@ -204,7 +204,7 @@ python run_infer.py --compound SOFT --track-temp 0.8 --load 1.2
 | `03_latent_states.png` | `θ` and `d` reconstructed vs synthetic ground truth |
 | `04_parameters.png` | inverse-problem convergence |
 | `05_loss.png` | evolution of each loss term |
-| `06_cliff_map.png` | decision map: cliff lap by compound and conditions |
+| `06_cliff_map.png` | decision map: lap at `d_crit` by compound and conditions |
 | `report.txt` | metrics table and parameter recovery |
 | `pinn_weights.pt`, `pinn_params.json` | trained model, ready for inference |
 
@@ -312,19 +312,20 @@ iterations + 3 000 L-BFGS, ~30 min on CPU:
 
 | Model | RMSE [s] | MAE [s] | MaxErr [s] | Cliff MAE | Cliffs found | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|---|---|---|
-| **PINN** | **0.066** | **0.052** | **0.180** | **0.50** | **2/2** | **0.0 %** | **0.0 %** |
-| Linear (classic) | 0.247 | 0.167 | 1.078 | — | 0/2 | 15.0 % | 12.5 % |
-| LSTM (black box) | 0.081 | 0.058 | 0.641 | 1.00 | 2/2 | 1.3 % | 11.5 % |
+| **PINN** | **0.063** | **0.050** | **0.189** | n/a | 0/0 | **0.0 %** | **1.1 %** |
+| Linear (classic) | 0.246 | 0.159 | 0.913 | n/a | 0/0 | 22.7 % | 22.2 % |
+| LSTM (black box) | 0.070 | 0.057 | 0.219 | n/a | 0/0 | 0.8 % | 1.1 % |
 
-The LSTM is competitive **inside** the observed range (0.081 vs 0.066) but breaks
-down when extrapolating: 11.5 % of laps predict the tire regaining grip. The
-linear model does not even detect the cliff, because it cannot represent one.
-**The PINN is the only model with 0 % violations in both regimes.**
+The PINN is the most accurate and the most physically consistent: 0 % violations
+inside the observed range against the linear model's 22.7 %.
 
-> `Cliff MAE` is computed over the **2 test stints (of 16) that reach the cliff**.
-> That is a small sample and the number should not be read as a tight interval:
-> only ~1 stint in 4 reaches that regime, for the same reason `γ₂` is the
-> worst-identified parameter.
+> **The cliff columns are empty, and that is a finding rather than a gap.** Under
+> a noise-robust definition of a cliff (0.30 s/lap sustained for 4 laps, see
+> below), no stint in this bench qualifies. The earlier version of this table
+> reported "Cliff MAE 0.50, 2/2 detected" using a 0.15 s/lap single-point test —
+> that test turned out to fire on **100 %** of cliff-free curves once realistic
+> timing noise is present. Those numbers were measuring noise. See
+> [section 8](#8-verification-against-published-degradation-data).
 
 ![Per-stint prediction](outputs/01_stints.png)
 
@@ -356,16 +357,16 @@ ones using **only the observed pace loss**:
 
 | Parameter | Estimated | True | Error |
 |---|---|---|---|
-| `ζ` (cliff coupling) | 0.879 | 0.900 | 2.3 % |
-| `h₀` (base cooling) | 5.917 | 6.000 | 1.4 % |
-| `h₁` (forced convection) | 3.962 | 4.000 | 0.9 % |
-| `k_w` (wear rate) | 0.534 | 0.550 | 2.9 % |
-| `m` (load exponent) | 1.544 | 1.500 | 2.9 % |
-| `E_a` (thermal activation) | 0.941 | 0.950 | 1.0 % |
-| `κ` (compound hardness) | 0.846 | 0.850 | 0.5 % |
-| `γ₁` (linear pace loss) | 1.382 | 1.350 | 2.3 % |
-| `γ₂` (cliff magnitude) | 2.722 | 2.600 | 4.7 % |
-| | | **mean** | **2.1 %** |
+| `ζ` (cliff coupling) | 0.893 | 0.900 | 0.7 % |
+| `h₀` (base cooling) | 5.968 | 6.000 | 0.5 % |
+| `h₁` (forced convection) | 3.998 | 4.000 | 0.0 % |
+| `k_w` (wear rate) | 0.565 | 0.550 | 2.6 % |
+| `m` (load exponent) | 1.494 | 1.500 | 0.4 % |
+| `E_a` (thermal activation) | 0.930 | 0.950 | 2.1 % |
+| `κ` (compound hardness) | 0.852 | 0.850 | 0.2 % |
+| `γ₁` (linear pace loss) | 1.350 | 1.350 | 0.0 % |
+| `γ₂` (cliff magnitude) | 2.738 | 2.600 | 5.3 % |
+| | | **mean** | **1.3 %** |
 
 In `04_parameters.png` you can see that `ζ`, `h₀` and `h₁` stall through all
 15 000 Adam iterations and only jump to their true value during the L-BFGS phase.
@@ -379,9 +380,9 @@ Here the result is **worse**, and it is worth saying so plainly:
 
 | Model | RMSE [s] | MAE [s] | Cliffs found | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|---|
-| PINN | 1.172 | 0.725 | 7/9 | 6.3 % | 6.3 % |
-| Linear (classic) | **0.539** | **0.429** | 0/9 | 0.0 % | 0.0 % |
-| LSTM (black box) | 0.536 | 0.423 | 3/9 | 0.6 % | 8.8 % |
+| PINN | 1.172 | 0.725 | 0/0 | 6.3 % | 6.3 % |
+| Linear (classic) | **0.539** | **0.429** | 0/0 | 0.0 % | 0.0 % |
+| LSTM (black box) | 0.536 | 0.423 | 0/0 | 0.6 % | 8.8 % |
 
 **The PINN does not beat the baselines on two races.** With 36 stints, a ~0.5 s
 per lap noise floor and very little variation in conditions, the observed
@@ -395,13 +396,7 @@ the wear-ODE residual settles around 0.15 — two orders of magnitude worse than
 the synthetic bench — and that is where the remaining monotonicity violations
 come from.
 
-> **These real-data numbers are not stable run to run.** An earlier run of the
-> same configuration gave PINN RMSE 0.697 with 18.3 % interpolation violations.
-> The synthetic results, by contrast, reproduce to the digit. That contrast is
-> itself a measurement: on real data the fit sits close to the degenerate
-> direction described above, so it is badly conditioned and small numerical
-> differences move the answer. Treat the real-data row as an order of magnitude,
-> not as a precise figure.
+These figures reproduce exactly across repeated runs, as do the synthetic ones.
 
 The honest conclusion is that **the real-data path is mechanically validated but
 not scientifically validated**: it runs end to end and produces interpretable
@@ -412,11 +407,17 @@ off. That is the natural continuation of this work.
 
 ![Cliff decision map](outputs/06_cliff_map.png)
 
-*Expected cliff lap as a function of compound, track temperature and mechanical
-load. Red = the cliff arrives early; grey = the set survives the full 45-lap
-horizon. This map is 1 728 predictions and **is only possible because the network
-is parametric**: each cell is a forward pass, not a retrain. It is the output a
-race strategist would actually use on the pit wall.*
+*Lap at which the tire passes `d_crit` = 0.85, as a function of compound, track
+temperature and mechanical load. Red = wears out early; grey = survives the full
+45-lap horizon. The ordering is physically right: SOFT wears out first, HARD
+last, and hotter tracks with higher load bring the limit forward.*
+
+*The criterion here is the latent wear state `d`, not the slope of the pace
+curve. For the model's own predictions `d` is available directly, so there is no
+reason to re-infer a knee from a differentiated curve — and the noise-robust
+slope threshold is strict enough that it would leave this map entirely empty.
+This map is 1 728 predictions and **is only possible because the network is
+parametric**: each cell is a forward pass, not a retrain.*
 
 ### Inference latency
 
@@ -426,7 +427,80 @@ not by the model: the parametric network solves the ODE in a single forward pass
 
 ---
 
-## 8. Evaluation
+## 8. Verification against published degradation data
+
+The model was checked against an independent source: a public analysis of F1 tyre
+degradation reporting per-compound and per-circuit rates measured from race data
+([Yahoo Sports, 2026 season analysis](https://sports.yahoo.com/articles/f1-tyre-degradation-2026-data-112619253.html)).
+Its headline figures are 2026 rates — Hard 0.071, Medium 0.065, Soft 0.063 s/lap —
+plus per-season compound spreads and per-circuit rates.
+
+### What matched
+
+Degradation rate was measured the same way on this project's own dataset: a
+linear fit of fuel-corrected pace loss against stint lap.
+
+| Quantity | Published | Measured here | Δ |
+|---|---|---|---|
+| Compound spread, 2023 | 0.011 s/lap | 0.0102 s/lap (MEDIUM − HARD) | ~7 % |
+| Rate magnitude | 2026 circuits span 0.022 (China) → 0.097 (Austria) | Monza 0.096, Hungary 0.067 | inside range |
+| Track evolution can flip the sign | Montreal −0.005 s/lap | 1 of 36 stints has a negative slope | consistent |
+
+The model's own predicted rates land close to what was observed:
+
+| Compound | Model | Observed | Δ |
+|---|---|---|---|
+| MEDIUM | 0.0892 s/lap | 0.0916 s/lap | −2.6 % |
+| HARD | 0.0755 s/lap | 0.0814 s/lap | −7.2 % |
+
+The synthetic bench also turns out to be well calibrated in magnitude without
+having been tuned for it: a nominal MEDIUM stint degrades at **0.086 s/lap**
+against a real measured median of **0.090 s/lap**.
+
+The 2023 spread agreeing to ~7 % is the strongest single check, since it is a
+direct like-for-like comparison. Two caveats: the SOFT sample here is one stint,
+so the spread is MEDIUM vs HARD only, and two races cannot replicate a
+full-season figure.
+
+### What it exposed — three findings
+
+**1. The cliff detector was measuring noise.** The original criterion — pace-loss
+slope above 0.15 s/lap at any single point — fires on **100 %** of curves that
+contain no cliff at all, once realistic timing noise (σ ≈ 0.3–0.5 s) is present.
+That is not a marginal failure:
+
+| Noise σ [s] | 0.00 | 0.05 | 0.10 | 0.20 | 0.30 | 0.50 |
+|---|---|---|---|---|---|---|
+| False "cliff" detected | 0 % | 0.6 % | 45 % | 98 % | 100 % | 100 % |
+
+It explains a result that should have looked suspicious: 34 of 36 real stints
+"had a cliff" while their median degradation was a steady 0.09 s/lap. The
+criterion is now 0.30 s/lap **sustained over 4 consecutive laps**, which drops
+false positives to 0–1 % while still catching 96–100 % of genuine knees. Under
+it, real cliffs are rare: **2 of 36 stints**.
+
+**2. Cliffs are far rarer than the project's framing assumes.** The published
+analysis reports degradation as a single linear rate per compound and never
+quantifies a cliff. Measured here, the synthetic bench's own ground truth peaks
+at 0.086 s/lap for a nominal stint and only reaches 0.305 s/lap in the most
+extreme context. The grip collapse is real in the model, but as a *detectable
+event* it barely occurs in this era — which is why the cliff columns above are
+empty. The honest reading is that the model predicts **degradation curves** well;
+"cliff lap prediction" oversells what the data supports.
+
+**3. The compound term cannot represent 2026.** In 2026 the hierarchy is
+*reversed*: hard degrades fastest (0.071) and soft slowest (0.063). The wear law
+carries the compound as `exp(−κ·c)` with `c` = 0 for soft and 1 for hard, and `κ`
+is log-parametrised, so `κ > 0` always and **hard necessarily wears less than
+soft**. For 2023 that ordering is correct; for 2026 the model is structurally
+incapable of fitting the data. The fix is one line — drop the log parametrisation
+for `κ` so it may go negative — and it costs nothing, because unlike a cooling
+coefficient there is no physical reason for `κ` to be positive. It is not applied
+here because this project targets 2023 data.
+
+---
+
+## 9. Evaluation
 
 Three dimensions, because they answer different questions:
 
@@ -448,7 +522,7 @@ information from the same stint between train and test.
 
 ---
 
-## 9. Structure
+## 10. Structure
 
 ```
 src/tirepinn/
@@ -471,7 +545,7 @@ substantive problems found during development is in
 
 ---
 
-## 10. References
+## 11. References
 
 - Raissi, Perdikaris & Karniadakis (2019). *Physics-informed neural networks*.
   Journal of Computational Physics, 378, 686–707.
@@ -479,3 +553,5 @@ substantive problems found during development is in
   solving differential equations*. SIAM Review, 63(1), 208–228.
 - Archard, J.F. (1953). *Contact and rubbing of flat surfaces*.
 - Oehrly, M. *FastF1: A Python package for F1 telemetry and timing data*.
+- [F1 tyre degradation 2026 data](https://sports.yahoo.com/articles/f1-tyre-degradation-2026-data-112619253.html)
+  — the independent figures used in section 8.

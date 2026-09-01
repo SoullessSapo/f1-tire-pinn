@@ -234,15 +234,20 @@ def cliff_lap(
 ) -> float | None:
     """First lap at which the pace curve enters the cliff.
 
-    Operational criterion: the slope of the pace loss exceeds the
-    cliff_slope_s_per_lap threshold. Returns None if the stint ends before the
-    cliff.
+    Operational criterion: the slope of the pace loss stays above
+    cliff_slope_s_per_lap for at least cliff_min_run consecutive laps. Returns
+    None if the stint ends before the cliff.
 
-    The curve is smoothed with a three-lap moving average before
-    differentiating. Without that, the timing noise of a real curve (a few
-    tenths of a second) dominates the derivative and triggers false cliffs. The
-    same criterion is applied to the observed ground truth and to any model's
-    prediction, which is what makes the metric comparable.
+    Both halves of that criterion are load-bearing, and the second one was added
+    after measuring the failure of the first. The curve is smoothed with a
+    three-lap moving average before differentiating, but smoothing alone is not
+    enough: against a purely linear curve with no cliff at all, plus the ~0.3-0.5 s
+    of timing noise a real lap carries, a single-point test fires on essentially
+    every stint. Demanding a sustained run is what separates a genuine knee from
+    a noise excursion.
+
+    The same criterion is applied to the observed ground truth and to any model's
+    prediction, which is what makes the metric comparable across models.
     """
     laps = np.asarray(laps, dtype=float)
     delta = np.asarray(delta, dtype=float)
@@ -252,11 +257,31 @@ def cliff_lap(
         kernel = np.ones(3) / 3.0
         padded = np.pad(delta, 1, mode="edge")
         delta = np.convolve(padded, kernel, mode="valid")
-    slope = np.gradient(delta, laps)
-    hit = np.nonzero(slope >= phys.cliff_slope_s_per_lap)[0]
+
+    hot = np.gradient(delta, laps) >= phys.cliff_slope_s_per_lap
+    run = 0
+    for i, is_hot in enumerate(hot):
+        run = run + 1 if is_hot else 0
+        if run >= phys.cliff_min_run:
+            return float(laps[i - phys.cliff_min_run + 1])
+    return None
+
+
+def wear_lap(laps: np.ndarray, d: np.ndarray, phys: PhysicsConfig) -> float | None:
+    """First lap at which the tire is worn past `d_crit`.
+
+    Use this whenever the latent wear state is available -- that is, for the
+    model's own predictions. It is the *physical* criterion, and unlike
+    `cliff_lap` it needs no noise-robustness machinery, because `d` is a
+    predicted state rather than a differentiated noisy measurement.
+
+    `cliff_lap` exists for the case where `d` is not available: comparing
+    against observed lap times, or against baselines that only predict pace.
+    """
+    hit = np.nonzero(np.asarray(d, dtype=float) >= phys.d_crit)[0]
     if hit.size == 0:
         return None
-    return float(laps[hit[0]])
+    return float(np.asarray(laps, dtype=float)[hit[0]])
 
 
 def remaining_useful_life(current_lap: float, cliff: float | None, horizon: float) -> float:

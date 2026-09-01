@@ -116,7 +116,17 @@ class PhysicsConfig:
     cliff_exponent: float = 8.0    # p in delta = g1*d + g2*d^p
 
     # --- operational definition of the cliff ---
-    cliff_slope_s_per_lap: float = 0.15
+    # The threshold and the minimum run length are set by a false-positive
+    # experiment, not by taste. Real F1 lap timing carries sigma ~0.3-0.5 s of
+    # noise from traffic, wind and driving. Against a purely linear curve with
+    # NO cliff at the measured median rate of 0.09 s/lap, a single-point test at
+    # 0.15 s/lap fires 100% of the time -- it detects noise, not cliffs.
+    # Requiring 0.30 s/lap sustained over 4 consecutive laps drops false
+    # positives to 0-1% while still catching 96-100% of genuine knees.
+    # 0.30 s/lap is also ~4x the normal degradation rate, which is a defensible
+    # physical definition of "falling off a cliff".
+    cliff_slope_s_per_lap: float = 0.30
+    cliff_min_run: int = 4
     d_crit: float = 0.85
     # Strategic decision horizon. It defines how far the ODE is enforced: the
     # physical domain is set by the question the model will be asked, not by how

@@ -1,13 +1,13 @@
-Source: synthetic | stints: 64 | laps: 1388
-  Stint length:  min=12 med=21 max=34
-  Pace loss:     min=-0.16s med=0.44s max=3.11s
+Source: synthetic | stints: 64 | laps: 1520
+  Stint length:  min=12 med=24 max=34
+  Pace loss:     min=-0.15s med=0.56s max=3.17s
   Compounds: HARD:21, MEDIUM:21, SOFT:22
 
 Model                     RMSE     MAE   MaxErr CliffMAE   Cliff   ViolIn ViolExtrap
 ------------------------------------------------------------------------------------
-PINN                     0.066   0.052    0.180     0.50   2/2       0.0%       0.0%
-Linear (classic)         0.247   0.167    1.078      n/a   0/2      15.0%      12.5%
-LSTM (black box)         0.081   0.058    0.641     1.00   2/2       1.3%      11.5%
+PINN                     0.063   0.050    0.189      n/a   0/0       0.0%       1.1%
+Linear (classic)         0.246   0.159    0.913      n/a   0/0      22.7%      22.2%
+LSTM (black box)         0.070   0.057    0.219      n/a   0/0       0.8%       1.1%
 
 ViolIn / ViolExtrap = % of laps where the model predicts the tire regaining grip,
 within the observed stint and extrapolating to the full horizon. The physically correct value is 0%.
@@ -15,13 +15,13 @@ within the observed stint and extrapolating to the full horizon. The physically 
 Physical parameter recovery (inverse problem)
 Parameter   Estimated       True  Rel. error
 ---------------------------------------------
-zeta           0.8793     0.9000        2.3%
-h0             5.9165     6.0000        1.4%
-h1             3.9624     4.0000        0.9%
-kw             0.5338     0.5500        2.9%
-m              1.5438     1.5000        2.9%
-Ea             0.9408     0.9500        1.0%
-kappa          0.8455     0.8500        0.5%
-gamma1         1.3817     1.3500        2.3%
-gamma2         2.7217     2.6000        4.7%
-                            mean        2.1%
+zeta           0.8934     0.9000        0.7%
+h0             5.9676     6.0000        0.5%
+h1             3.9983     4.0000        0.0%
+kw             0.5645     0.5500        2.6%
+m              1.4941     1.5000        0.4%
+Ea             0.9298     0.9500        2.1%
+kappa          0.8519     0.8500        0.2%
+gamma1         1.3499     1.3500        0.0%
+gamma2         2.7378     2.6000        5.3%
+                            mean        1.3%

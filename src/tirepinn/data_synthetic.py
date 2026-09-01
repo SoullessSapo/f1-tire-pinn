@@ -9,8 +9,9 @@ and adds measurement noise. It serves two purposes:
    from the observed pace loss alone. With real data that check is impossible,
    because no reference ground truth exists.
 
-The generator imitates a strategist's decision: the stint is cut a couple of
-laps after the cliff, because no team runs a destroyed tire.
+The generator imitates a strategist's decision: the stint is cut a few laps
+after the tire is heavily worn, because no team runs a destroyed tire but none
+pits at the exact instant either.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import numpy as np
 
 from .config import COMPOUND_INDEX, ContextRanges, DataConfig, PhysicsConfig
 from .dataset import Stint, StintDataset
-from .physics import GROUND_TRUTH, TireParams, cliff_lap, integrate_stint, pace_loss
+from .physics import GROUND_TRUTH, TireParams, integrate_stint, pace_loss
 
 # Compounds simulated, in order.
 _COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
@@ -55,15 +56,21 @@ def generate(
         # actually have pitted.
         laps_full, theta_full, d_full = integrate_stint(cfg.max_stint, context, params, phys)
         delta_full = pace_loss(d_full, params)
-        cliff = cliff_lap(laps_full, delta_full, phys)
 
-        if cliff is not None:
-            # Leave a few laps *after* the cliff. A team does not pit at the
-            # exact instant: it loses laps deciding, waiting for a pit window or
-            # covering a rival. Those are also the only laps that carry
+        # Where would the team have pitted? The decision is driven by the
+        # physical state -- how worn the tire is -- not by the slope of the
+        # observable. Keying it to `d` crossing d_crit rather than to
+        # `cliff_lap` matters: the cliff detector is deliberately strict so it
+        # survives real timing noise, and tying the generator to it would make
+        # the synthetic stint lengths an artefact of a detection threshold.
+        worn = np.nonzero(d_full >= phys.d_crit)[0]
+        if worn.size:
+            # A few laps *past* heavy wear: a team does not pit at the exact
+            # instant, it loses laps deciding, waiting for a pit window or
+            # covering a rival. Those are also the only laps carrying
             # information about the d -> 1 regime, which is what gamma2 and the
             # scale of kw depend on (see README, identifiability).
-            n_laps = int(min(cfg.max_stint, cliff + rng.integers(2, 6)))
+            n_laps = int(min(cfg.max_stint, laps_full[worn[0]] + rng.integers(2, 6)))
         else:
             n_laps = int(rng.integers(cfg.min_stint, cfg.max_stint + 1))
         n_laps = int(np.clip(n_laps, cfg.min_stint, cfg.max_stint))

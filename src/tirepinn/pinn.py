@@ -72,9 +72,9 @@ from .config import INPUT_DIM, LEARNABLE_PARAMS, OUTPUT_DIM, Config
 from .dataset import StintDataset, input_bounds
 from .physics import (
     TireParams,
-    cliff_lap,
     pace_loss,
     theta_rhs,
+    wear_lap,
     wear_rate,
 )
 
@@ -410,11 +410,16 @@ class TirePINN:
     def strategy(
         self, context: np.ndarray, horizon: int | None = None, current_lap: float = 0.0
     ) -> dict:
-        """Output for the pit wall: cliff lap and remaining useful life."""
+        """Output for the pit wall: wear-limit lap and remaining useful life.
+
+        Keyed to the latent state `d` crossing `d_crit`, not to the slope of the
+        predicted pace curve: the state is available directly here, so there is
+        no reason to re-infer it from a differentiated curve.
+        """
         phys = self.cfg.physics
         horizon = horizon or phys.strategy_horizon
         pred = self.predict_curve(context, np.arange(1, horizon + 1))
-        cliff = cliff_lap(pred["laps"], pred["delta"], phys)
+        cliff = wear_lap(pred["laps"], pred["d"], phys)
         rul = None if cliff is None else max(cliff - current_lap, 0.0)
         return {
             "cliff_lap": cliff,

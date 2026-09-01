@@ -16,7 +16,7 @@ import numpy as np
 
 from .config import PhysicsConfig
 from .dataset import StintDataset
-from .physics import cliff_lap, pace_loss
+from .physics import cliff_lap, wear_lap
 
 COLORS = {
     "PINN": "#d62728",
@@ -218,10 +218,16 @@ def plot_loss_history(losshistory, path: str | Path, labels: list[str] | None = 
 def plot_cliff_map(
     pinn, phys: PhysicsConfig, path: str | Path, horizon: int | None = None, res: int = 24
 ) -> None:
-    """Strategy map: expected cliff lap by compound and conditions.
+    """Strategy map: expected lap at which the tire is worn past d_crit.
 
     This is the end product from the pit wall's point of view, and it is only
     possible because the network is parametric: each cell is one forward pass.
+
+    The criterion is the latent wear state `d`, not the slope of the pace curve.
+    For the model's own predictions `d` is available directly, so there is no
+    need to infer a knee from a differentiated curve -- and the noise-robust
+    slope threshold is so strict (by necessity, see `cliff_lap`) that it would
+    leave this map almost entirely empty.
     """
     _style()
     horizon = horizon or phys.strategy_horizon
@@ -230,7 +236,6 @@ def plot_cliff_map(
     load = np.linspace(0.6, 1.4, res)
     laps = np.arange(1, horizon + 1, dtype=float)
     tau = laps / phys.lap_ref
-    params = pinn.learned_params()
 
     grid_load, grid_track = np.meshgrid(load, track, indexing="ij")
     n_cells = grid_load.size
@@ -253,9 +258,9 @@ def plot_cliff_map(
         x[:, 0] = np.tile(tau, n_cells)
         x[:, 1:] = np.repeat(contexts, laps.size, axis=0)
         _, d = pinn.predict(x)
-        delta = pace_loss(d, params).reshape(n_cells, laps.size)
+        wear = d.reshape(n_cells, laps.size)
 
-        cells = [cliff_lap(laps, curve, phys) for curve in delta]
+        cells = [wear_lap(laps, curve, phys) for curve in wear]
         grid = np.array([np.nan if c is None else c for c in cells])
         grids.append(grid.reshape(res, res))
 
@@ -285,7 +290,10 @@ def plot_cliff_map(
         ax.set_facecolor("0.85")
         ax.grid(False)
 
-    fig.colorbar(im, ax=axes.ravel().tolist(), label="Cliff lap")
-    fig.suptitle(f"Decision map: expected cliff lap (grey = no cliff within {horizon} laps)")
+    fig.colorbar(im, ax=axes.ravel().tolist(), label="Lap at d_crit")
+    fig.suptitle(
+        f"Decision map: lap at which the tire passes d_crit = {phys.d_crit:g} "
+        f"(grey = not reached within {horizon} laps)"
+    )
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
