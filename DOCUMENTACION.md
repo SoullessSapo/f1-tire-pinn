@@ -921,76 +921,137 @@ expresarlo. Ahora `κ` usa la parametrización acotada con sigmoide sobre un ran
 simétrico `[−1.5, +1.5]`, de modo que **su signo lo decide el dato, no la
 parametrización**.
 
-## 14.1 La jerarquía de compuestos NO se invirtió
+## 14.1 La jerarquía de compuestos: estos datos no la resuelven
 
-Midiendo la degradación igual que el análisis publicado —ajuste lineal de la
-pérdida de ritmo corregida por combustible contra la vuelta del stint:
+El análisis publicado de 2026 reporta que la jerarquía se invirtió — **el duro es
+ahora el compuesto que más se degrada** (0.071 s/vuelta, contra 0.065 del medio y
+0.063 del blando). Es también la lectura predominante en el paddock.
 
-| Compuesto | n | Medido 2026 | Publicado 2026 |
-|---|---|---|---|
-| DURO | 225 | 0.0764 s/vuelta | 0.071 |
-| MEDIO | 166 | 0.0808 s/vuelta | 0.065 |
-| BLANDO | 41 | 0.0808 s/vuelta | 0.063 |
-
-El orden agrupado sale casi plano y **no** reproduce la inversión publicada.
-Controlando por circuito el panorama cambia por completo:
+Mis datos no pueden ni confirmarlo ni refutarlo. Estimando la degradación por
+circuito, controlando por piloto y por el efecto de vuelta de carrera:
 
 | | DURO − MEDIO |
 |---|---|
-| Agrupando todos los circuitos | −0.004 s/vuelta (casi plano) |
-| **Dentro del mismo circuito** | **−0.027 s/vuelta** (orden clásico, claro) |
+| Media sobre 11 circuitos | −0.0061 s/vuelta |
+| Error estándar | 0.0063 |
+| IC 95 % | **[−0.018, +0.006]** |
+| t | −0.96, no significativo |
+| Circuitos donde el duro se degrada más | 5 de 11 |
 
-Solo 3 de 10 circuitos muestran el duro degradándose más rápido. **El compuesto
-está confundido con el circuito**: las tasas por circuito van de 0.02 (Mónaco) a
-0.157 (Barcelona), un rango 7× mayor que el efecto de compuesto, y los duros se
-usan justo en los circuitos degradantes — Barcelona tiene 34 stints de duro,
-Mónaco ninguno. Agrupar sin controlar infla la tasa aparente del duro,
-exactamente en la dirección que fabricaría una inversión.
+El intervalo de confianza **contiene el +0.006 publicado**, así que la afirmación
+es perfectamente compatible con estos datos. También contiene el cero y el orden
+clásico. La razón de que no se pueda concluir nada es de escala: la desviación
+del efecto entre circuitos es 0.021 s/vuelta, **tres veces el efecto que se
+busca**. Once carreras no alcanzan para resolver una diferencia de 0.006
+s/vuelta contra tanta variabilidad entre circuitos.
 
-El `κ = +0.436` ajustado coincide: positivo, orden clásico, y eso que las cotas
-le permitían irse a negativo. La PINN controla el confundido por construcción,
-porque su vector de contexto ya lleva `q_fric`, `load` y `track_temp` — así que
-su `κ` es el efecto dentro de condiciones comparables.
+> **Corrección a una versión anterior de este documento.** Antes reportaba
+> DURO − MEDIO = −0.027 s/vuelta y concluía que el orden clásico se mantenía con
+> claridad, atribuyendo la inversión publicada a un confundido con el circuito.
+> Ese número venía de un análisis que usaba la corrección fija de 0.055 s/vuelta
+> —que después demostré sesgada hasta ±0.8 s por stint, y con signo distinto en
+> cada circuito— y que no controlaba por piloto. Rehecho con el efecto de vuelta
+> estimado y efectos de piloto, la diferencia se encoge a −0.006 y pierde
+> significancia. El confundido es real y vale la pena controlarlo; la conclusión
+> tajante que saqué de él no estaba respaldada.
 
-Esto es un desacuerdo con la fuente publicada, y lo planteo como **hipótesis, no
-como corrección**: no tengo su metodología, así que el confundido es una
-explicación plausible de la discrepancia, no una demostrada.
 
-## 14.2 Precisión: más datos acercaron la brecha pero no la cerraron
+**De dónde viene la afirmación.** Rastrea a un único análisis
+([F1 Chronicle](https://f1chronicle.substack.com/p/f1-tyre-degradation-in-2026-the-data),
+sindicado por Yahoo Sports); ninguna otra fuente independiente que encontrara lo
+reporta, y el material de prensa de Pirelli para 2026 describe la filosofía de
+diseño de la gama sin afirmar en ningún momento una inversión en las tasas de
+desgaste. Por su propia descripción, el método **agrupa todos los stints por
+compuesto entre carreras sin controlar por circuito, piloto ni equipo**, no
+reporta intervalos de confianza, y excluye Barcelona por degradación anómala. Sí
+prueba la robustez de la corrección de combustible en un rango global de
+0.03–0.08 s/vuelta —lo cual descarta un error *global*, pero no la variación por
+circuito que medí aquí (−0.026 en Miami a −0.097 en Spa), porque una constante
+única sesga cada circuito de forma distinta y el uso de compuestos está
+correlacionado con el circuito.
+
+Nada de eso hace que la afirmación sea falsa. Significa que ninguno de los dos
+análisis la zanja: el suyo no reporta incertidumbre, y el mío tiene un intervalo
+que cruza el cero.
+
+El `κ` ajustado cuenta lo mismo: sale positivo pero pequeño, y ahora su signo lo
+decide el dato y no la parametrización.
+
+## 14.2 Corregir por vuelta de carrera: combustible y evolución de pista juntos
+
+Dos cosas hacen que un coche vaya más rápido según avanza la carrera: quema unos
+100 kg de combustible, y el circuito engoma. Al ponerme a modelar la evolución de
+pista por separado descubrí que **no se puede**: ambas son funciones suaves y
+monótonas de la vuelta de carrera, así que separarlas sería inventarse una
+descomposición que los datos no sostienen. Lo que sí es estimable es su suma, y
+estimarla es mejor que asumir una constante:
+
+| Circuito | Estimado | vs el −0.055 asumido | Sesgo sobre 20 vueltas |
+|---|---|---|---|
+| Spa | −0.097 | −0.042 | **+0.83 s** |
+| Melbourne | −0.063 | −0.008 | +0.16 s |
+| Shanghái | −0.056 | −0.001 | +0.01 s |
+| Zandvoort | −0.035 | +0.020 | −0.40 s |
+| Spielberg | −0.031 | +0.024 | −0.48 s |
+| Miami | −0.026 | +0.029 | **−0.57 s** |
+
+El sesgo va de −0.57 s a +0.83 s según el circuito —comparable a la señal
+completa de degradación— y con signos distintos, así que no se cancela: distorsiona
+justo la relación circuito-degradación que el modelo intenta aprender. Que Spa sea
+el extremo tiene sentido físico: es la vuelta más larga del calendario, luego más
+combustible quemado por vuelta. Un valor fijo en s/vuelta no puede saber eso.
+
+La identificación viene de que los coches llevan neumáticos de edades distintas a
+una misma vuelta de carrera, porque paran en momentos distintos —desviación medida
+de 2 a 7 vueltas, correlación con la vuelta de carrera de solo 0.22 a 0.76. El
+ajuste es `tiempo ~ piloto + f(vuelta_carrera) + degradación(edad, compuesto)`,
+con `f` en base lineal a trozos para medir su forma en vez de asumirla.
+
+## 14.3 Precisión: más datos acercaron la brecha pero no la cerraron
 
 | Modelo | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|
-| PINN | 0.964 | 0.659 | 5.7 % | 7.4 % |
-| Lineal (clásico) | 0.796 | 0.567 | 0.8 % | 4.0 % |
-| LSTM (caja negra) | **0.768** | **0.539** | 4.7 % | 5.9 % |
+| PINN | 0.928 | 0.604 | **4.8 %** | **7.1 %** |
+| Lineal (clásico) | 0.817 | 0.615 | 8.9 % | 29.0 % |
+| LSTM (caja negra) | **0.748** | **0.533** | 11.1 % | 10.1 % |
 
-Un oráculo que ajusta una recta distinta a cada stint *de prueba* saca 0.538 s,
-así que ése es el suelo de ruido irreducible. Los tres modelos quedan dentro de
-1.5× de ese suelo.
+Un oráculo que ajusta una recta distinta a cada stint *de prueba* saca 0.531 s,
+así que ése es el suelo de ruido irreducible.
 
-**Mi predicción de que más carreras dejarían ganar a la PINN se puso a prueba y
-no se cumplió.** Con 12× más datos la brecha relativa sí se cerró bastante —de
-2.2× peor que el mejor baseline con dos carreras de 2023, a 1.26× aquí— pero la
-PINN sigue perdiendo.
+El cuadro es genuinamente mixto, ni victoria ni derrota limpia. La LSTM es la más
+precisa. La PINN **ya le gana al modelo lineal en MAE** (0.604 contra 0.615)
+aunque sigue perdiendo en RMSE, lo que significa menos errores típicos pero una
+cola más pesada. Y en coherencia física la PINN va muy por delante: **7.1 % de
+violaciones al extrapolar contra 29.0 % del lineal y 10.1 % de la LSTM**.
 
-Liberar más parámetros tampoco la rescata. Con `m` y `E_a` también libres el
-ajuste mejora un poco (RMSE 0.925) pero la física colapsa: `m = 0.010` (sin
-dependencia de carga), `E_a = 0.174` (casi sin activación térmica), `κ = 0.012`
-(sin efecto de compuesto). Es la misma patología del problema 3 —la red apagando
-la física para ajustar— así que me quedo con la configuración de dos parámetros.
+Hay dos cosas que conviene separar. Primero, **mi predicción de que más carreras
+dejarían ganar a la PINN se puso a prueba y no se cumplió**: con 12× más datos la
+brecha relativa de RMSE se cerró de 2.2× a 1.24×, pero no se cerró. Segundo, la
+corrección por vuelta cambió más a los *baselines* que a la PINN — sus tasas de
+violación casi se triplicaron. La sobre-corrección estaba inyectando una tendencia
+ascendente espuria que enmascaraba su tendencia a doblarse hacia abajo, así que
+parte de lo bien que se portaban era un artefacto de datos mal corregidos.
 
-El fichero `outputs/2026/06_cliff_map.png` enseña el precio sin adornos: a
-diferencia del mapa sintético, la superficie de decisión de 2026 no es monótona
-ni en carga ni en temperatura, con manchas de desgaste temprano en zonas frías y
-de baja carga. El modelo no aprendió una respuesta a las condiciones que sea de
-fiar.
+Liberar más parámetros tampoco rescata la precisión. Con `m` y `E_a` también
+libres el ajuste mejora un poco mientras la física colapsa —`m = 0.010`,
+`E_a = 0.174`, `κ = 0.012`— la misma patología del problema 3, así que me quedo
+con la configuración de dos parámetros.
 
-## 14.3 Conclusión honesta para 2026
+El fichero `outputs/2026/06_cliff_map.png` enseña lo que sigue faltando: a
+diferencia del mapa sintético, la superficie de decisión de 2026 no es monótona ni
+en carga ni en temperatura. El modelo respeta la física *dentro* de un stint pero
+no ha aprendido un mapeo confiable de condiciones a degradación. La razón probable
+es que los proxies de contexto llevan su propio ruido, y su relación con la
+degradación es débil al lado de los ~0.5 s de ruido de cronometraje — así que la
+red puede ajustar cada curva casi solo con `τ`, sin llegar a aprender la respuesta
+al contexto.
 
-El pipeline escala a una temporada completa y el problema inverso devuelve **un
-resultado genuinamente útil y verificable desde fuera**: el orden de compuestos y
-su confundido con el circuito. Como predictor de pérdida de ritmo, sigue
-perdiendo contra una recta.
+## 14.4 Conclusión honesta para 2026
+
+El pipeline escala a una temporada completa, el problema inverso devuelve
+coeficientes interpretables, y la PINN es claramente el modelo más coherente
+físicamente. Como predictor de ritmo sigue siendo superada, y su respuesta a las
+condiciones todavía no es de fiar.
 
 ---
 

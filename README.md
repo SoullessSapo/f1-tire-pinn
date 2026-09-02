@@ -513,73 +513,131 @@ model was structurally unable to express. `κ` now uses the bounded sigmoid
 parametrisation instead, over a symmetric `[-1.5, +1.5]`, so **its sign is
 decided by the data rather than by the parametrisation**.
 
-### The compound hierarchy did not invert
+### The compound hierarchy: this data cannot resolve it
 
-Measuring degradation the same way as the published analysis — linear fit of
-fuel-corrected pace loss against stint lap — gives:
+Published analysis of 2026 reports that the hierarchy inverted — **the hard is
+now the compound degrading fastest** (0.071 s/lap, against 0.065 medium and
+0.063 soft). That is also the prevailing view in the paddock.
 
-| Compound | n | Measured 2026 | Published 2026 |
-|---|---|---|---|
-| HARD | 225 | 0.0764 s/lap | 0.071 |
-| MEDIUM | 166 | 0.0808 s/lap | 0.065 |
-| SOFT | 41 | 0.0808 s/lap | 0.063 |
-
-The pooled ordering is nearly flat and does **not** reproduce the published
-reversal. Controlling for circuit changes the picture completely:
+This project's data can neither confirm nor refute it. Estimating degradation
+per circuit while controlling for driver and for the race-lap effect gives:
 
 | | HARD − MEDIUM |
 |---|---|
-| Pooled across circuits | −0.004 s/lap (nearly flat) |
-| **Within the same circuit** | **−0.027 s/lap** (classic ordering, clear) |
+| Mean across 11 circuits | −0.0061 s/lap |
+| Standard error | 0.0063 |
+| 95 % CI | **[−0.018, +0.006]** |
+| t | −0.96, not significant |
+| Circuits where hard degrades more | 5 of 11 |
 
-Only 3 of 10 circuits show hard degrading faster. **Compound is confounded with
-circuit**: per-circuit rates span 0.02 (Monaco) to 0.157 (Barcelona), a 7× range
-that dwarfs the compound effect, and hards are run precisely at the degrading
-circuits — Barcelona has 34 hard stints, Monaco none. Pooling without
-controlling inflates hard's apparent rate, in exactly the direction that would
-manufacture a reversal.
+The confidence interval **contains the published +0.006**, so the claim is
+entirely compatible with this data. It also contains zero and the classic
+ordering. The reason nothing can be concluded is scale: the standard deviation
+of the effect across circuits is 0.021 s/lap, **three times the effect being
+looked for**. Eleven races are not enough to resolve a 0.006 s/lap difference
+against that much circuit-to-circuit variability.
 
-The fitted `κ = +0.436` agrees: positive, the classic ordering, even though the
-bounds allowed it to go negative. The PINN controls the confound by
-construction, because its context vector already carries `q_fric`, `load` and
-`track_temp` — so its `κ` is the within-circuit effect.
+> **Correction to an earlier version of this document.** It previously reported
+> HARD − MEDIUM = −0.027 s/lap and concluded the classic ordering held clearly,
+> attributing the published inversion to a circuit confound. That number came
+> from an analysis that used the fixed 0.055 s/lap fuel correction — since shown
+> to be biased by up to ±0.8 s per stint, with different signs at different
+> circuits — and did not control for driver. Re-run with the estimated race-lap
+> effect and driver effects, the difference shrinks to −0.006 and loses
+> significance. The confound is real and worth controlling; the confident
+> conclusion drawn from it was not supported.
 
-This is a disagreement with the published source, offered as a hypothesis rather
-than a correction: the article's methodology is not available here, so the
-confound is a plausible explanation for the discrepancy, not a demonstrated one.
+
+**Where the claim comes from.** It traces to a single analysis
+([F1 Chronicle](https://f1chronicle.substack.com/p/f1-tyre-degradation-in-2026-the-data),
+syndicated by Yahoo Sports); no other independent source found reports it, and
+Pirelli's own 2026 press material describes the compound range's design
+philosophy without ever claiming an inversion in wear rates. By its own
+description the method **pools every stint per compound across races without
+controlling for circuit, driver or team**, reports no confidence intervals, and
+excludes Barcelona for anomalous degradation. It does test fuel-correction
+robustness across a global 0.03-0.08 s/lap range -- which rules out a *global*
+mis-specification, but not the per-circuit variation measured here (-0.026 at
+Miami to -0.097 at Spa), since a single constant biases circuits differently and
+compound usage correlates with circuit.
+
+None of that makes the claim wrong. It means neither analysis settles it: theirs
+reports no uncertainty, and this one's interval spans zero.
+
+The fitted `κ` follows the same story: it comes out positive but small, and its
+sign is now decided by the data rather than by the parametrisation.
+
+### Correcting for race lap: fuel burn and track evolution together
+
+Two things make a car faster as a race progresses — it burns off ~100 kg of fuel,
+and the circuit rubbers in. Setting out to model track evolution separately
+showed that **it cannot be done**: both are smooth monotone functions of race lap,
+so splitting them would invent a decomposition the data cannot support. What is
+estimable is their sum, and estimating it beats assuming a constant:
+
+| Circuit | Estimated | vs assumed −0.055 | Bias over a 20-lap stint |
+|---|---|---|---|
+| Spa | −0.097 | −0.042 | **+0.83 s** |
+| Melbourne | −0.063 | −0.008 | +0.16 s |
+| Shanghai | −0.056 | −0.001 | +0.01 s |
+| Zandvoort | −0.035 | +0.020 | −0.40 s |
+| Spielberg | −0.031 | +0.024 | −0.48 s |
+| Miami | −0.026 | +0.029 | **−0.57 s** |
+
+The bias runs from −0.57 s to +0.83 s depending on circuit — comparable to the
+entire degradation signal, and with different signs, so it does not cancel. It
+distorts precisely the circuit-to-degradation relationship the model is trying to
+learn. Spa being the extreme makes physical sense: it has the longest lap on the
+calendar, so more fuel burns per lap. A fixed s/lap figure cannot know that.
+
+Identification comes from cars carrying different tire ages at the same race lap,
+because they pit at different times — measured spread of 2–7 laps, correlation
+with race lap of only 0.22–0.76. The fit is
+`lap_time ~ driver + f(race_lap) + degradation(age, compound)`, with `f` a
+piecewise-linear spline so its shape is measured rather than assumed.
 
 ### Accuracy: more data narrowed the gap but did not close it
 
 | Model | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|
-| PINN | 0.964 | 0.659 | 5.7 % | 7.4 % |
-| Linear (classic) | 0.796 | 0.567 | 0.8 % | 4.0 % |
-| LSTM (black box) | **0.768** | **0.539** | 4.7 % | 5.9 % |
+| PINN | 0.928 | 0.604 | **4.8 %** | **7.1 %** |
+| Linear (classic) | 0.817 | 0.615 | 8.9 % | 29.0 % |
+| LSTM (black box) | **0.748** | **0.533** | 11.1 % | 10.1 % |
 
-An oracle that fits a separate straight line to each *test* stint scores 0.538 s,
-so that is the irreducible noise floor. Every model sits within 1.5× of it.
+An oracle fitting a separate straight line to each *test* stint scores 0.531 s,
+so that is the irreducible noise floor.
 
-**The earlier prediction that more races would let the PINN win was tested and
-did not hold.** With 12× more data the relative gap did close substantially —
-from 2.2× worse than the best baseline on two 2023 races to 1.26× here — but the
-PINN still loses.
+The picture is genuinely mixed rather than a clean win or loss. The LSTM is the
+most accurate. The PINN now beats the linear model on MAE (0.604 vs 0.615) while
+still losing on RMSE, which means fewer typical errors but a heavier tail. And on
+physical consistency the PINN is ahead by a wide margin: **7.1 % violations when
+extrapolating against 29.0 % for the linear fit and 10.1 % for the LSTM**.
 
-Freeing more parameters does not rescue it either. With `m` and `E_a` also free
-the fit improves slightly (RMSE 0.925) but the physics collapses: `m = 0.010`
-(no load dependence), `E_a = 0.174` (almost no thermal activation), `κ = 0.012`
-(no compound effect). That is the same pathology documented in problem 3 — the
-network switching the physics off to fit — so the two-parameter configuration is
-the one kept.
+Two things are worth separating here. First, **the earlier prediction that more
+races would let the PINN win was tested and did not hold** — with 12× the data
+the relative RMSE gap closed from 2.2× to 1.24×, but it did not close. Second,
+the race-lap correction changed the *baselines* more than the PINN: their
+violation rates roughly tripled. The over-correction had been injecting a
+spurious upward trend that masked their tendency to bend downwards, so part of
+how well-behaved they looked was an artefact of badly corrected data.
 
-`outputs/2026/06_cliff_map.png` shows the cost plainly: unlike the synthetic
-map, the 2026 decision surface is not monotone in load or temperature, with
-early-wear patches in cool low-load regions. The model has not learned a
-trustworthy response to conditions from this data.
+Freeing more parameters does not rescue accuracy either. With `m` and `E_a` also
+free the fit improves slightly while the physics collapses — `m = 0.010`,
+`E_a = 0.174`, `κ = 0.012` — the same pathology as problem 3, so the
+two-parameter configuration is kept.
 
-**Honest bottom line for 2026:** the pipeline scales to a full season and the
-inverse problem returns one genuinely useful, externally checkable result — the
-compound ordering and its confound. As a predictor of pace loss it is still
-beaten by a straight line.
+`outputs/2026/06_cliff_map.png` shows what is still missing: unlike the synthetic
+map, the 2026 decision surface is not monotone in load or temperature. The model
+respects physics *within* a stint but has not learned a trustworthy mapping from
+conditions to degradation. The likely reason is that the context proxies carry
+their own noise, and their relation to degradation is weak next to the ~0.5 s
+timing noise — so the network can fit each curve from `τ` alone without ever
+learning the context response.
+
+**Honest bottom line for 2026:** the pipeline scales to a full season, the
+inverse problem returns interpretable coefficients, and the PINN is clearly the
+most physically consistent model. As a pace predictor it is still beaten, and its
+response to conditions is not yet trustworthy.
 
 ---
 

@@ -74,6 +74,7 @@
     "session": "R",
     "drivers": [],
     "cache_dir": "cache",
+    "estimate_race_lap_effect": true,
     "fuel_effect_s_per_lap": 0.055,
     "q_fric_ref": 1900.0,
     "load_ref": 3.8,
@@ -110,5 +111,5 @@
       1.0
     ]
   },
-  "out_dir": "outputs/2026_2free"
+  "out_dir": "outputs/2026"
 }

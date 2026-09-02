@@ -17,9 +17,11 @@ Lateral acceleration is not in the telemetry: it is reconstructed by
 differentiating the GPS trajectory twice, with prior smoothing because a
 numerical second derivative amplifies sampling noise.
 
-The degradation observable is fuel-corrected pace loss: a car sheds around
-100 kg over a race and that alone is worth more than a second per lap, so
-without correcting for it degradation is completely masked.
+The degradation observable is pace loss corrected for everything that changes
+lap time with race lap but is not the tire: fuel burn plus track evolution. That
+combined effect is estimated per race rather than assumed, because it varies
+from -0.026 to -0.097 s/lap across circuits and a wrong constant biases each
+circuit differently. See `_estimate_race_lap_effect`.
 """
 
 from __future__ import annotations
@@ -129,6 +131,59 @@ def _lap_dynamics(tel: pd.DataFrame) -> dict[str, float] | None:
         "load_raw": float(np.mean(a_total) / _G),
         "speed_raw": float(np.mean(speed)),
     }
+
+
+def _estimate_race_lap_effect(df: pd.DataFrame, n_knots: int = 4) -> np.ndarray:
+    """Estimate how lap time changes with race lap, for reasons other than the tire.
+
+    Two effects make a car faster as a race progresses: it burns off ~100 kg of
+    fuel, and the circuit rubbers in. **They are not separable from each other** --
+    both are smooth monotone functions of race lap -- so estimating them
+    individually would invent a decomposition the data cannot support. What is
+    estimable, and what this returns, is their sum.
+
+    Estimating it beats assuming it. A fixed s/lap fuel figure cannot know that a
+    7 km lap burns more fuel per lap than a 4 km one: measured across 2026, the
+    combined effect ranges from -0.026 s/lap at Miami to -0.097 at Spa, against a
+    typical assumed -0.055. Over a 20-lap stint that is a bias between -0.57 s
+    and +0.83 s, comparable to the entire degradation signal, and with different
+    signs at different circuits -- so it does not cancel, it distorts precisely
+    the circuit-to-degradation relationship the model is trying to learn.
+
+    Identification comes from cars carrying tires of different ages at the same
+    race lap, because they pit at different times. Measured on 2026 races, tire
+    age has a spread of 2-7 laps at a given race lap and correlates only 0.22-0.76
+    with it; if everyone pitted together the two effects would be one variable and
+    nothing could separate them.
+
+    The fit is `lap_time ~ driver + f(race_lap) + degradation(age, compound)`,
+    with `f` a piecewise-linear spline so its shape is measured rather than
+    assumed, and the degradation terms present only to stop `f` absorbing them.
+
+    Returns f evaluated at laps 0..max, normalised to f(0) = 0.
+    """
+    lap_max = int(df["lap_number"].max())
+    lap = df["lap_number"].to_numpy(dtype=float)
+    knots = np.linspace(1, lap_max, n_knots + 2)[1:-1]
+
+    drivers = pd.get_dummies(df["driver"], prefix="D").to_numpy(dtype=float)
+    evo = [lap] + [np.maximum(lap - k, 0.0) for k in knots]
+    compounds = pd.get_dummies(df["compound"], prefix="C").to_numpy(dtype=float)
+    deg = [compounds[:, j] * df["tyre_life"].to_numpy(dtype=float) for j in range(compounds.shape[1])]
+
+    x = np.column_stack([drivers, *evo, *deg])
+    y = df["lap_time"].to_numpy(dtype=float)
+    ok = np.isfinite(x).all(axis=1) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if x.shape[0] < 5 * x.shape[1]:  # too few laps to identify this many terms
+        return np.zeros(lap_max + 2)
+
+    coef = np.linalg.lstsq(x.T @ x + 1e-6 * np.eye(x.shape[1]), x.T @ y, rcond=None)[0]
+    ev = coef[drivers.shape[1] : drivers.shape[1] + len(evo)]
+
+    grid = np.arange(0, lap_max + 2, dtype=float)
+    f = ev[0] * grid + sum(e * np.maximum(grid - k, 0.0) for e, k in zip(ev[1:], knots, strict=False))
+    return f - f[0]
 
 
 def _track_temp_series(session) -> tuple[np.ndarray, np.ndarray] | None:
@@ -243,12 +298,20 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
     df["track_temp_norm"] = np.clip((df["track_temp"] - 20.0) / 40.0, 0.0, 1.0)
     df["compound_idx"] = df["compound"].map(lambda c: COMPOUND_INDEX.get(c, 0.5))
 
-    # --- Step 3: fuel correction ---
-    # The car loses ~1.7 kg per lap and every 10 kg is worth ~0.3 s. Uncorrected,
-    # the gain from getting lighter looks like the opposite of degradation.
-    df["lap_time_corr"] = df["lap_time"] - cfg.fuel_effect_s_per_lap * (
-        total_laps - df["lap_number"]
-    )
+    # --- Step 3: race-lap correction (fuel burn + track evolution) ---
+    # Uncorrected, the car speeding up as it lightens and as the track rubbers in
+    # looks like the opposite of degradation, and masks it entirely.
+    # `estimate_race_lap_effect` measures the combined effect per race instead of
+    # assuming a fixed s/lap figure; see that function for why the two cannot be
+    # separated and why assuming one number biases circuits differently.
+    if cfg.estimate_race_lap_effect:
+        effect = _estimate_race_lap_effect(df)
+        idx = np.clip(df["lap_number"].to_numpy(dtype=int), 0, len(effect) - 1)
+        df["lap_time_corr"] = df["lap_time"] - effect[idx]
+    else:
+        df["lap_time_corr"] = df["lap_time"] - cfg.fuel_effect_s_per_lap * (
+            total_laps - df["lap_number"]
+        )
 
     # --- Step 4: assembling stints ---
     stints: list[Stint] = []
@@ -344,6 +407,7 @@ def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
             tuple(gps),
             tuple(cfg.drivers),
             cfg.fuel_effect_s_per_lap,
+            cfg.estimate_race_lap_effect,
             cfg.q_fric_ref,
             cfg.load_ref,
             cfg.speed_ref,

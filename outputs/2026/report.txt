@@ -1,13 +1,13 @@
-Source: fastf1:2026-Melbourne-R + fastf1:2026-Shanghai-R + fastf1:2026-Suzuka-R + fastf1:2026-Miami-R + fastf1:2026-Montreal-R + fastf1:2026-Barcelona-R + fastf1:2026-Spielberg-R + fastf1:2026-Silverstone-R + fastf1:2026-Spa-Francorchamps-R + fastf1:2026-Budapest-R + fastf1:2026-Zandvoort-R | stints: 432 | laps: 8192
+Source: fastf1:2026-Melbourne-R + fastf1:2026-Shanghai-R + fastf1:2026-Suzuka-R + fastf1:2026-Miami-R + fastf1:2026-Montreal-R + fastf1:2026-Barcelona-R + fastf1:2026-Spielberg-R + fastf1:2026-Silverstone-R + fastf1:2026-Spa-Francorchamps-R + fastf1:2026-Budapest-R + fastf1:2026-Zandvoort-R | stints: 434 | laps: 8197
   Stint length:  min=8 med=18 max=42
-  Pace loss:     min=-2.39s med=0.96s max=5.88s
-  Compounds: HARD:225, MEDIUM:166, SOFT:41
+  Pace loss:     min=-1.84s med=0.86s max=5.88s
+  Compounds: HARD:225, MEDIUM:167, SOFT:42
 
 Model                     RMSE     MAE   MaxErr CliffMAE   Cliff   ViolIn ViolExtrap
 ------------------------------------------------------------------------------------
-PINN                     0.964   0.659    5.213     7.33   3/7       5.7%       7.4%
-Linear (classic)         0.796   0.567    4.881      n/a   0/7       0.8%       4.0%
-LSTM (black box)         0.768   0.539    4.643      n/a   0/7       4.7%       5.9%
+PINN                     0.928   0.604    4.636     3.33   6/6       4.8%       7.1%
+Linear (classic)         0.817   0.615    4.617      n/a   0/6       8.9%      29.0%
+LSTM (black box)         0.748   0.533    4.630     2.00   1/6      11.1%      10.1%
 
 ViolIn / ViolExtrap = % of laps where the model predicts the tire regaining grip,
 within the observed stint and extrapolating to the full horizon. The physically correct value is 0%.

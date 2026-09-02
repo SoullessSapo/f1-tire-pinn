@@ -114,16 +114,23 @@ class PhysicsConfig:
 
     # kappa is the one physical coefficient whose SIGN is not fixed by physics.
     # It says how much a harder compound resists wear, via exp(-kappa*c) with
-    # c = 0 soft, 1 hard. Positive kappa means the classic ordering, harder wears
-    # less. That held through 2025, but in 2026 the hierarchy inverted: hard
-    # degrades fastest (0.071 s/lap) and soft slowest (0.063). Verified in the
-    # data too -- Australia 2026 gives HARD 0.071 against MEDIUM 0.018.
+    # c = 0 soft, 1 hard. Positive kappa is the classic ordering, harder wears
+    # less. Published analysis claims 2026 inverted that.
     #
     # Log-parametrising kappa, as the other ODE coefficients are, would force
-    # kappa > 0 and make the model structurally incapable of fitting 2026. It is
-    # given symmetric bounds instead, so it may go negative. |kappa| <= 1.5 caps
-    # the soft-to-hard wear ratio at e^1.5 ~ 4.5x in either direction, which is
-    # generous. Unlike a cooling coefficient, nothing physical demands kappa > 0.
+    # kappa > 0 and make the model structurally incapable of expressing such an
+    # inversion. Symmetric bounds are used instead, so the SIGN IS DECIDED BY THE
+    # DATA rather than by the parametrisation. |kappa| <= 1.5 caps the
+    # soft-to-hard wear ratio at e^1.5 ~ 4.5x either way, which is generous.
+    # Unlike a cooling coefficient, nothing physical demands kappa > 0.
+    #
+    # Having freed it, the 2026 fit returns a small positive kappa. That is not
+    # evidence against the reported inversion: measuring the rates directly,
+    # controlling for driver and for the race-lap effect, gives HARD - MEDIUM =
+    # -0.006 +/- 0.006 s/lap over 11 circuits, t = -0.96, with 5 of 11 circuits
+    # going the other way. The 95% interval contains the published +0.006, zero,
+    # and the classic ordering alike. Circuit-to-circuit variability is 3x the
+    # effect, so a season cannot resolve it. See the 2026 section of the README.
     kappa_bounds: tuple[float, float] = (-1.5, 1.5)
 
     # --- pace-loss observable ---
@@ -199,7 +206,13 @@ class DataConfig:
     session: str = "R"
     drivers: tuple[str, ...] = ()
     cache_dir: str = "cache"
-    fuel_effect_s_per_lap: float = 0.055   # fuel correction [s/lap]
+    # Correction for everything that changes lap time with race lap and is not
+    # the tire: fuel burn plus track evolution. Estimating it per race beats
+    # assuming a constant, because the effect scales with lap length and with how
+    # fast a circuit rubbers in -- see `data_fastf1._estimate_race_lap_effect`.
+    # The fixed figure below is only the fallback when estimation is disabled.
+    estimate_race_lap_effect: bool = True
+    fuel_effect_s_per_lap: float = 0.055   # fallback fuel correction [s/lap]
 
     # Fixed references for making the telemetry proxies dimensionless.
     # Deliberately NOT the session median: normalising each race against itself
