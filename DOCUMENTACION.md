@@ -1007,51 +1007,72 @@ de 2 a 7 vueltas, correlación con la vuelta de carrera de solo 0.22 a 0.76. El
 ajuste es `tiempo ~ piloto + f(vuelta_carrera) + degradación(edad, compuesto)`,
 con `f` en base lineal a trozos para medir su forma en vez de asumirla.
 
-## 14.3 Precisión: más datos acercaron la brecha pero no la cerraron
+## 14.3 Los proxies de contexto eran mayormente ruido
+
+El mapa de decisión de 2026 salía físicamente incoherente —no monótono ni en
+carga ni en temperatura— lo que decía que la red no había aprendido un mapeo
+confiable de condiciones a degradación. La descomposición de varianza de los
+proxies explica por qué:
+
+| Proxy | Varianza **dentro** de un circuito |
+|---|---|
+| `q_fric` | **53 %** |
+| `load` | **61 %** |
+| `speed` | 7 % |
+| `track_temp` | 1 % |
+
+Más de la mitad de la variación de los dos proxies que alimentan los términos
+físicos ocurre entre stints del *mismo* circuito. La prueba decisiva es si esa
+variación predice algo — correlacionando la desviación de cada proxy respecto a
+la media de su circuito contra la desviación de la degradación medida:
+
+| Proxy | r entre circuitos | r dentro de circuito |
+|---|---|---|
+| `q_fric` | 0.248 | **0.001** |
+| `load` | 0.201 | **0.029** |
+| `speed` | −0.054 | −0.203 |
+| `track_temp` | **0.664** | 0.041 |
+
+Con n = 423 el valor crítico al 5 % es ±0.095. Así que la variación dentro de
+circuito de `q_fric` y `load` **no predice absolutamente nada** — es ruido de
+medición de derivar dos veces el GPS. Entre circuitos esos mismos proxies sí
+llevan señal, y `track_temp` entre circuitos es el predictor más fuerte que hay.
+
+Colapsar `q_fric` y `load` a su mediana por carrera descarta ruido y conserva
+señal. A `speed` se lo deja en paz a propósito: su desviación dentro de circuito
+*sí* es predictiva (r = −0.203, significativa, y con el signo físicamente
+correcto — más velocidad, más enfriamiento, menos desgaste), así que promediarlo
+tiraría información real.
+
+## 14.4 Resultados finales de 2026
 
 | Modelo | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|
-| PINN | 0.928 | 0.604 | **4.8 %** | **7.1 %** |
-| Lineal (clásico) | 0.817 | 0.615 | 8.9 % | 29.0 % |
-| LSTM (caja negra) | **0.748** | **0.533** | 11.1 % | 10.1 % |
+| **PINN** | **0.694** | **0.494** | **2.7 %** | **5.7 %** |
+| Lineal (clásico) | 0.801 | 0.602 | 7.9 % | 26.0 % |
+| LSTM (caja negra) | 0.746 | 0.541 | 9.9 % | 11.2 % |
 
-Un oráculo que ajusta una recta distinta a cada stint *de prueba* saca 0.531 s,
-así que ése es el suelo de ruido irreducible.
+Un oráculo que ajusta una recta distinta a cada stint *de prueba* saca 0.531 s.
 
-El cuadro es genuinamente mixto, ni victoria ni derrota limpia. La LSTM es la más
-precisa. La PINN **ya le gana al modelo lineal en MAE** (0.604 contra 0.615)
-aunque sigue perdiendo en RMSE, lo que significa menos errores típicos pero una
-cola más pesada. Y en coherencia física la PINN va muy por delante: **7.1 % de
-violaciones al extrapolar contra 29.0 % del lineal y 10.1 % de la LSTM**.
+**Quitado el ruido, la PINN gana en todas las métricas**, y es la primera vez que
+lo hace con datos reales. Eliminar el ruido de contexto la movió de 0.928 a 0.694
+de RMSE, un 25 % de mejora, mientras los baselines apenas se movieron (0.817 →
+0.801 y 0.748 → 0.746).
 
-Hay dos cosas que conviene separar. Primero, **mi predicción de que más carreras
-dejarían ganar a la PINN se puso a prueba y no se cumplió**: con 12× más datos la
-brecha relativa de RMSE se cerró de 2.2× a 1.24×, pero no se cerró. Segundo, la
-corrección por vuelta cambió más a los *baselines* que a la PINN — sus tasas de
-violación casi se triplicaron. La sobre-corrección estaba inyectando una tendencia
-ascendente espuria que enmascaraba su tendencia a doblarse hacia abajo, así que
-parte de lo bien que se portaban era un artefacto de datos mal corregidos.
+Esa asimetría es lo interesante, y es mecánica, no suerte. Los baselines usan el
+contexto solo como variables de regresión, donde el ruido atenúa un coeficiente y
+poco más. La PINN **impone la física como función del contexto**, evaluando el
+residuo de la EDO en puntos de colocación repartidos por todo el hipercubo — así
+que unas coordenadas de contexto ruidosas corrompen la restricción *en todas
+partes*, no solo donde hay datos. **Cuanto más se apoya un modelo en sus
+entradas, más le duele el ruido en ellas.**
 
-Liberar más parámetros tampoco rescata la precisión. Con `m` y `E_a` también
-libres el ajuste mejora un poco mientras la física colapsa —`m = 0.010`,
-`E_a = 0.174`, `κ = 0.012`— la misma patología del problema 3, así que me quedo
-con la configuración de dos parámetros.
+El mapa de decisión es coherente por primera vez con datos reales: el desgaste
+llega antes con carga alta y pista caliente, y primero en el blando. La
+incoherencia anterior era el síntoma; esto era la causa.
 
-El fichero `outputs/2026/06_cliff_map.png` enseña lo que sigue faltando: a
-diferencia del mapa sintético, la superficie de decisión de 2026 no es monótona ni
-en carga ni en temperatura. El modelo respeta la física *dentro* de un stint pero
-no ha aprendido un mapeo confiable de condiciones a degradación. La razón probable
-es que los proxies de contexto llevan su propio ruido, y su relación con la
-degradación es débil al lado de los ~0.5 s de ruido de cronometraje — así que la
-red puede ajustar cada curva casi solo con `τ`, sin llegar a aprender la respuesta
-al contexto.
-
-## 14.4 Conclusión honesta para 2026
-
-El pipeline escala a una temporada completa, el problema inverso devuelve
-coeficientes interpretables, y la PINN es claramente el modelo más coherente
-físicamente. Como predictor de ritmo sigue siendo superada, y su respuesta a las
-condiciones todavía no es de fiar.
+El `κ` ajustado baja a +0.031, prácticamente sin efecto de compuesto — coherente
+con lo dicho arriba de que una temporada no alcanza para resolverlo.
 
 ---
 

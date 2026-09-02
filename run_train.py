@@ -21,6 +21,7 @@ import numpy as np
 from tirepinn import plots
 from tirepinn.baselines import LinearDegBaseline, LSTMBaseline
 from tirepinn.config import REAL_DATA_FREE_PARAMS, Config
+from tirepinn.dataset import aggregate_context_by_race
 from tirepinn.evaluate import evaluate, format_report, parameter_recovery
 from tirepinn.physics import GROUND_TRUTH
 from tirepinn.pinn import LEARNABLE, TirePINN
@@ -55,6 +56,22 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--lbfgs", type=int, default=3000)
     g.add_argument("--lstm-epochs", type=int, default=800)
     g.add_argument("--no-baselines", action="store_true")
+    g.add_argument(
+        "--aggregate-context",
+        nargs="+",
+        default=["q_fric", "load"],
+        metavar="FIELD",
+        help="collapse these context proxies to their per-race median. The "
+        "default pair is measured, not guessed: their within-circuit variation "
+        "predicts nothing. See dataset.aggregate_context_by_race.",
+    )
+    g.add_argument(
+        "--no-aggregate-context",
+        action="store_const",
+        const=[],
+        dest="aggregate_context",
+        help="keep every context proxy at its per-stint value",
+    )
     g.add_argument(
         "--free-params",
         nargs="+",
@@ -112,8 +129,14 @@ def load_data(cfg: Config, args: argparse.Namespace):
     from tirepinn import data_fastf1
 
     if len(args.gp) == 1:
-        return data_fastf1.build_dataset(cfg.data, cfg.physics)
-    return data_fastf1.build_multi_dataset(cfg.data, cfg.physics, args.gp)
+        data = data_fastf1.build_dataset(cfg.data, cfg.physics)
+    else:
+        data = data_fastf1.build_multi_dataset(cfg.data, cfg.physics, args.gp)
+
+    if args.aggregate_context:
+        data = aggregate_context_by_race(data, args.aggregate_context)
+        print(f"  Context collapsed to race medians: {', '.join(args.aggregate_context)}")
+    return data
 
 
 def main() -> int:

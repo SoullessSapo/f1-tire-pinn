@@ -7,6 +7,7 @@ the physics it enforces is an ODE in time *within* a stint.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -133,6 +134,51 @@ class StintDataset:
             f"  Pace loss:     min={deltas.min():.2f}s med={np.median(deltas):.2f}s max={deltas.max():.2f}s\n"
             f"  Compounds: {comp_txt}"
         )
+
+
+def aggregate_context_by_race(
+    data: StintDataset, fields: Sequence[str], key: Callable[[Stint], str] | None = None
+) -> StintDataset:
+    """Replace per-stint context values with the median over their race.
+
+    Motivated by a measurement, not a hunch. Decomposing the variance of the
+    context proxies over the 2026 season:
+
+        q_fric  53% of its variance is WITHIN a circuit
+        load    61% within
+        speed    7% within
+        track_temp  1% within
+
+    and correlating the within-circuit deviation of each proxy against the
+    within-circuit deviation of the measured degradation rate gives r = 0.001 for
+    q_fric and 0.029 for load, against a 5% critical value of 0.095. So more than
+    half the variance of those two proxies is variation that **predicts nothing**
+    -- it is measurement noise from double-differentiated GPS, not a real
+    difference between one driver's stint and another's.
+
+    Between circuits the same proxies do carry signal (track_temp r = 0.664,
+    q_fric 0.248, load 0.201), which is the variation worth keeping. Collapsing
+    to the race median keeps it and discards the noise.
+
+    `speed` is deliberately not aggregated by default: its within-circuit
+    deviation does correlate with degradation (r = -0.203, significant), so
+    averaging it would throw away real signal.
+    """
+    key = key or (lambda s: s.stint_id[:3])
+    idx = [CONTEXT_NAMES.index(f) for f in fields]
+
+    groups: dict[str, list[Stint]] = {}
+    for stint in data.stints:
+        groups.setdefault(key(stint), []).append(stint)
+
+    for members in groups.values():
+        medians = np.median(np.vstack([s.context for s in members]), axis=0)
+        for stint in members:
+            for i in idx:
+                stint.context[i] = medians[i]
+
+    meta = dict(data.meta, context_aggregated=list(fields))
+    return StintDataset(data.stints, data.source, meta)
 
 
 def input_bounds(

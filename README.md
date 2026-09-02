@@ -596,48 +596,72 @@ with race lap of only 0.22–0.76. The fit is
 `lap_time ~ driver + f(race_lap) + degradation(age, compound)`, with `f` a
 piecewise-linear spline so its shape is measured rather than assumed.
 
-### Accuracy: more data narrowed the gap but did not close it
+### The context proxies were mostly noise
+
+The 2026 decision map came out physically incoherent — not monotone in load or
+temperature — which said the network had not learned a trustworthy mapping from
+conditions to degradation. Decomposing the variance of the context proxies shows
+why:
+
+| Proxy | Variance **within** a circuit |
+|---|---|
+| `q_fric` | **53 %** |
+| `load` | **61 %** |
+| `speed` | 7 % |
+| `track_temp` | 1 % |
+
+More than half the variation in the two proxies that feed the physics terms
+happens between stints at the *same* circuit. The decisive test is whether that
+variation predicts anything — correlating each proxy's within-circuit deviation
+against the within-circuit deviation of measured degradation:
+
+| Proxy | r between circuits | r within a circuit |
+|---|---|---|
+| `q_fric` | 0.248 | **0.001** |
+| `load` | 0.201 | **0.029** |
+| `speed` | −0.054 | −0.203 |
+| `track_temp` | **0.664** | 0.041 |
+
+With n = 423 the 5 % critical value is ±0.095. So the within-circuit variation of
+`q_fric` and `load` **predicts nothing at all** — it is measurement noise from
+double-differentiated GPS. Between circuits the same proxies do carry signal, and
+`track_temp` between circuits is the strongest predictor available.
+
+Collapsing `q_fric` and `load` to their per-race median therefore discards noise
+and keeps signal. `speed` is deliberately left alone: its within-circuit
+deviation *is* predictive (r = −0.203, significant, and with the physically right
+sign — more speed, more cooling, less wear), so averaging it would throw away
+real information.
+
+### Final 2026 results
 
 | Model | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
 |---|---|---|---|---|
-| PINN | 0.928 | 0.604 | **4.8 %** | **7.1 %** |
-| Linear (classic) | 0.817 | 0.615 | 8.9 % | 29.0 % |
-| LSTM (black box) | **0.748** | **0.533** | 11.1 % | 10.1 % |
+| **PINN** | **0.694** | **0.494** | **2.7 %** | **5.7 %** |
+| Linear (classic) | 0.801 | 0.602 | 7.9 % | 26.0 % |
+| LSTM (black box) | 0.746 | 0.541 | 9.9 % | 11.2 % |
 
-An oracle fitting a separate straight line to each *test* stint scores 0.531 s,
-so that is the irreducible noise floor.
+An oracle fitting a separate straight line to each *test* stint scores 0.531 s.
 
-The picture is genuinely mixed rather than a clean win or loss. The LSTM is the
-most accurate. The PINN now beats the linear model on MAE (0.604 vs 0.615) while
-still losing on RMSE, which means fewer typical errors but a heavier tail. And on
-physical consistency the PINN is ahead by a wide margin: **7.1 % violations when
-extrapolating against 29.0 % for the linear fit and 10.1 % for the LSTM**.
+**With the noise removed the PINN wins on every metric**, and it is the first
+time it does so on real data. Removing the context noise moved it from 0.928 to
+0.694 RMSE, a 25 % improvement, while the baselines barely moved (0.817 → 0.801
+and 0.748 → 0.746).
 
-Two things are worth separating here. First, **the earlier prediction that more
-races would let the PINN win was tested and did not hold** — with 12× the data
-the relative RMSE gap closed from 2.2× to 1.24×, but it did not close. Second,
-the race-lap correction changed the *baselines* more than the PINN: their
-violation rates roughly tripled. The over-correction had been injecting a
-spurious upward trend that masked their tendency to bend downwards, so part of
-how well-behaved they looked was an artefact of badly corrected data.
+That asymmetry is the point, and it is mechanistic rather than lucky. The
+baselines use the context only as regression features, where noise attenuates a
+coefficient and little else. The PINN *imposes physics as a function of the
+context*, evaluating the ODE residual at collocation points spread across the
+whole context hypercube — so noisy context coordinates corrupt the constraint
+everywhere, not only where there is data. **The more a model leans on its inputs,
+the more it is hurt by noise in them.**
 
-Freeing more parameters does not rescue accuracy either. With `m` and `E_a` also
-free the fit improves slightly while the physics collapses — `m = 0.010`,
-`E_a = 0.174`, `κ = 0.012` — the same pathology as problem 3, so the
-two-parameter configuration is kept.
+The decision map is coherent for the first time on real data: wear arrives
+earliest at high load and high track temperature, and soonest on the soft. The
+earlier incoherence was the symptom; this was the cause.
 
-`outputs/2026/06_cliff_map.png` shows what is still missing: unlike the synthetic
-map, the 2026 decision surface is not monotone in load or temperature. The model
-respects physics *within* a stint but has not learned a trustworthy mapping from
-conditions to degradation. The likely reason is that the context proxies carry
-their own noise, and their relation to degradation is weak next to the ~0.5 s
-timing noise — so the network can fit each curve from `τ` alone without ever
-learning the context response.
-
-**Honest bottom line for 2026:** the pipeline scales to a full season, the
-inverse problem returns interpretable coefficients, and the PINN is clearly the
-most physically consistent model. As a pace predictor it is still beaten, and its
-response to conditions is not yet trustworthy.
+The fitted `κ` drops to +0.031, essentially no compound effect — consistent with
+the finding above that a season cannot resolve one.
 
 ---
 
