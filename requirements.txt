@@ -1,5 +1,10 @@
-# v0 deliberadamente no usa DeepXDE ni FastF1: el PINN esta escrito
-# directamente en PyTorch y los datos son sinteticos.
+# Para entrenar (run.py) hacen falta solo estas tres.
 torch>=2.0
 numpy>=1.24
 matplotlib>=3.7
+
+# Para descargar datos reales (descargar_datos.py).
+# Si solo vas a usar el banco sintetico, puedes saltartelas.
+fastf1>=3.3
+pandas>=2.0
+scipy>=1.10

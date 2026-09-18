@@ -1,52 +1,99 @@
-"""The reference model the PINN has to beat.
+"""
+EL MODELO CONTRA EL QUE HAY QUE COMPETIR
+========================================
 
-This is the empirical model teams actually use: a degradation rate in seconds
-per lap. Written here as least squares on features of (tau, compound), and
-deliberately given a fair chance -- a quadratic term and a compound interaction,
-so it is not a straw man that loses for lack of flexibility.
+Este es el modelo que los equipos usan de verdad: una tasa de degradacion en
+segundos por vuelta, ajustada por compuesto y condiciones. Aqui esta escrito
+como una regresion por minimos cuadrados.
 
-It has two properties worth naming, because they are what the comparison is
-about:
+Se le da una oportunidad JUSTA a proposito: ademas del termino lineal en el
+tiempo lleva un termino cuadratico y las interacciones del tiempo con las cinco
+variables de contexto. Un rival de paja que pierde por falta de flexibilidad no
+demuestra nada.
 
-  - Inside the measured range it is hard to beat. Over 12-30 laps the true curve
-    is gently bent, and a parabola fits a gentle bend very well.
-  - Outside it, nothing holds it. A parabola fitted to a saturating curve keeps
-    curving, so extrapolated far enough it will predict the tire regaining grip.
-    That is not a tuning problem, it is what the function class does.
+Y aun asi tiene dos propiedades que son justo de lo que va la comparacion:
+
+  - DENTRO del rango medido es dificil de batir. A lo largo de 12-30 vueltas la
+    curva real esta suavemente doblada, y una parabola ajusta muy bien una
+    curva suavemente doblada.
+
+  - FUERA de ese rango no lo sujeta nada. Una parabola ajustada a una curva que
+    satura sigue curvandose, asi que extrapolada lo suficiente acabara
+    prediciendo que el neumatico RECUPERA agarre. Eso no es un problema de
+    ajuste: es lo que hace esa familia de funciones.
+
+
+MINIMOS CUADRADOS, EN UNA LINEA
+-------------------------------
+Se busca el vector de coeficientes `w` que minimiza ||X*w - y||^2, donde cada
+fila de X son las caracteristicas de una vuelta y cada y es su perdida de ritmo
+medida. La solucion se obtiene resolviendo (X'X)w = X'y.
+
+El termino `ridge` suma un numero minusculo a la diagonal de X'X. Es un seguro:
+si dos caracteristicas fueran casi identicas, X'X seria casi singular y el
+sistema no tendria solucion estable. No cambia el resultado, evita el fallo.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from physics import VUELTAS_REF, Contexto
 
-class LinearDegBaseline:
-    """Least squares on [1, tau, tau^2, c, tau*c]."""
 
-    name = "Lineal clasico"
+class BaselineLineal:
+    """Minimos cuadrados sobre caracteristicas de (tiempo, contexto)."""
+
+    nombre = "Lineal clasico"
 
     def __init__(self, ridge: float = 1e-6):
         self.ridge = ridge
-        self.coef_: np.ndarray | None = None
+        self.coeficientes: np.ndarray | None = None
 
     @staticmethod
-    def _features(tau: np.ndarray, c: np.ndarray) -> np.ndarray:
-        tau = np.asarray(tau, dtype=float).reshape(-1, 1)
-        c = np.asarray(c, dtype=float).reshape(-1, 1)
-        return np.hstack([np.ones_like(tau), tau, tau**2, c, tau * c])
+    def _caracteristicas(tau: np.ndarray, contexto: np.ndarray) -> np.ndarray:
+        """Construye la matriz de diseno X.
 
-    def fit(self, tau: np.ndarray, c: np.ndarray, delta: np.ndarray) -> LinearDegBaseline:
-        x = self._features(tau, c)
+        Por cada vuelta, 13 numeros:
+            1                        el termino independiente
+            tau, tau^2               la forma de la curva en el tiempo
+            las 5 de contexto        el nivel que impone cada condicion
+            tau * (las 5)            como cada condicion cambia la PENDIENTE
+
+        Las interacciones del ultimo grupo son las que le permiten decir "en
+        pista caliente se degrada mas deprisa", que es lo que hace que la
+        comparacion sea honesta.
+        """
+        tau = np.asarray(tau, dtype=float).reshape(-1, 1)
+        contexto = np.asarray(contexto, dtype=float).reshape(tau.shape[0], -1)
+
+        return np.hstack([
+            np.ones_like(tau),      # 1
+            tau,                    # 1
+            tau ** 2,               # 1
+            contexto,               # 5
+            tau * contexto,         # 5
+        ])                          # total: 13 columnas
+
+    def ajustar(self, entradas: np.ndarray, delta: np.ndarray) -> BaselineLineal:
+        """`entradas` es la matriz (N, 6) que devuelve data.aplanar()."""
+        tau = entradas[:, 0]
+        contexto = entradas[:, 1:]
+
+        X = self._caracteristicas(tau, contexto)
         y = np.asarray(delta, dtype=float).ravel()
-        gram = x.T @ x + self.ridge * np.eye(x.shape[1])
-        self.coef_ = np.linalg.solve(gram, x.T @ y)
+
+        gram = X.T @ X + self.ridge * np.eye(X.shape[1])
+        self.coeficientes = np.linalg.solve(gram, X.T @ y)
         return self
 
-    def predict_stint(self, c: float, laps: np.ndarray) -> np.ndarray:
-        if self.coef_ is None:
-            raise RuntimeError("Ajusta el modelo antes de predecir")
-        from physics import LAP_REF
+    def predecir_stint(self, contexto: Contexto, vueltas: np.ndarray) -> np.ndarray:
+        """Misma firma que la del PINN, para que el evaluador no distinga."""
+        if self.coeficientes is None:
+            raise RuntimeError("Llama a ajustar() antes de predecir")
 
-        laps = np.asarray(laps, dtype=float).ravel()
-        tau = laps / LAP_REF
-        return self._features(tau, np.full_like(tau, float(c))) @ self.coef_
+        vueltas = np.asarray(vueltas, dtype=float).ravel()
+        tau = vueltas / VUELTAS_REF
+        contexto_repetido = np.tile(contexto.vector().reshape(1, -1), (vueltas.size, 1))
+
+        return self._caracteristicas(tau, contexto_repetido) @ self.coeficientes

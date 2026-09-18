@@ -1,10 +1,23 @@
-Modelo                 RMSE      MAE ViolDentro   ViolExtrap
-------------------------------------------------------------
-PINN                  0.053    0.044       0.0%         0.0%
-Lineal clasico        0.054    0.045       0.0%        11.4%
+48 stints | 1019 vueltas
+  Longitud del stint:  min=12 mediana=22 max=30
+  Perdida de ritmo:    min=-0.06s mediana=0.22s max=1.09s
+  Compuestos: HARD:16, MEDIUM:16, SOFT:16
+
+Modelo                 RMSE      MAE  ErrorMax  ViolDentro   ViolExtrap
+-----------------------------------------------------------------------
+PINN                  0.048    0.040     0.113        0.0%         0.0%
+Lineal clasico        0.052    0.042     0.166        0.0%         0.8%
 
 ViolDentro / ViolExtrap = % de vueltas donde el modelo predice que el
-neumatico RECUPERA agarre. Es fisicamente imposible; el valor correcto es 0 %.
+neumatico RECUPERA agarre. Es fisicamente imposible: el valor correcto es 0 %.
 
-Problema inverso (una constante):
-  kw estimado 1.5116  |  real 1.5000  |  error 0.8 %
+Problema inverso: recuperacion de las constantes fisicas
+Constante      Estimado       Real     Error
+---------------------------------------------
+kw               0.5578     0.5500      1.4%
+m                1.5439     1.5000      2.9%
+Ea               0.8721     0.9500      8.2%
+Eq               0.4102     0.4000      2.5%
+Ev               0.2279     0.3500     34.9%
+kappa            0.8003     0.8500      5.8%
+                             media      9.3%

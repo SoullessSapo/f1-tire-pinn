@@ -16,15 +16,24 @@ salió de medir que algo no funcionaba.
 | Framework | PyTorch puro | DeepXDE |
 | Física | 1 EDO (desgaste) | 2 EDO acopladas (térmica + desgaste) |
 | Cliff | no representable | emerge de la realimentación |
-| Entradas de la red | `(τ, c)` | `(τ, q, λ, v, T_pista, c)` |
-| Parámetros estimados | 1 | 9 |
+| Entradas de la red | `(τ, q, λ, v, T_pista, c)` | `(τ, q, λ, v, T_pista, c)` |
+| Parámetros estimados | 6 | 9 |
 | Condición inicial | término de pérdida | transformación de salida (exacta) |
 | Optimizador | Adam | Adam → L-BFGS |
-| Datos | sintéticos | FastF1, 11 carreras, 434 stints |
+| Datos | sintéticos **o FastF1** | FastF1, 11 carreras, 434 stints |
+| Corrección de vuelta de carrera | pendiente lineal | spline lineal a trozos |
 | Baselines | lineal | lineal + LSTM |
-| Métricas | RMSE, monotonía | + cliff, MAE, MaxErr |
-| Tamaño de la red | 1 185 pesos | 13 058 pesos |
-| Código | ~600 líneas | ~2 800 líneas |
+| Métricas | RMSE, MAE, MaxErr, monotonía | + vuelta del cliff |
+| Tamaño de la red | 12 993 pesos | 13 058 pesos |
+| Código | 912 líneas de código + 901 de comentarios | ~2 800 líneas |
+
+Respecto a la v0 original han cambiado cuatro filas: las entradas de la red,
+los parámetros estimados, los datos y el tamaño de la red. Es decir, **el paso 2
+ya está dado y el paso 6 está a medias**.
+
+Lo que sigue separando esta rama de `main` es, sobre todo, **la física**: aquí
+no hay temperatura como estado propio, y por tanto no hay cliff. Ése es el
+paso 1, y es el que de verdad importa.
 
 ---
 
@@ -55,9 +64,12 @@ Coste: se pierde la solución analítica. Por eso el integrador RK4 de
 `physics.py` ya está aquí en v0, validado contra la forma cerrada mientras
 todavía era barato comprobarlo.
 
-## Paso 2 · Hacer la red paramétrica
+## Paso 2 · Hacer la red paramétrica  ✅ HECHO EN ESTA RAMA
 
-**El problema.** v0 toma `(τ, c)`. Eso permite tres curvas, una por compuesto.
+> Este paso ya está dado aquí. La red toma las seis entradas y estima seis
+> constantes físicas. Se deja el texto porque explica **por qué** hacía falta.
+
+**El problema.** La v0 original tomaba `(τ, c)`. Eso permite tres curvas, una por compuesto.
 Pero la degradación depende de la temperatura de pista, de la carga del
 circuito, de la energía de fricción. Un PINN de libro de texto resolvería una
 trayectoria por cada combinación, o sea reentrenar para cada stint: media hora
@@ -125,7 +137,13 @@ composición — y necesitan información de curvatura para moverse.
 **El cambio.** Adam para explorar, L-BFGS (cuasi-Newton) para refinar. Con eso,
 los nueve parámetros se recuperan con **1,3 % de error medio**.
 
-## Paso 6 · Datos reales
+## Paso 6 · Datos reales  ◐ A MEDIAS EN ESTA RAMA
+
+> `descargar_datos.py` ya baja telemetría real, reconstruye los proxies y
+> escribe un CSV que `run.py --fuente csv` sabe entrenar. Lo que sigue siendo
+> más simple aquí es la corrección de vuelta de carrera: esta rama ajusta una
+> **pendiente lineal** por carrera, `main` ajusta un **spline lineal a trozos**
+> de 4 nudos, porque la forma de esa curva no tiene por qué ser una recta.
 
 **El problema.** Nada de lo que el modelo necesita es observable. Temperatura
 interna, carga vertical y estado de la goma son propiedad de cada equipo. Lo
