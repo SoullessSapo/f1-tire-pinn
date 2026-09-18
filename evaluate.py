@@ -1,42 +1,43 @@
 """
-COMO SE MIDE SI UN MODELO ES BUENO
-==================================
+HOW A MODEL IS JUDGED
+=====================
 
-Dos metricas, porque responden a preguntas distintas y una sola no basta.
-
-
-1) RMSE (y MAE)
----------------
-Cuanto se equivoca el modelo en la vuelta que esta mirando ahora mismo.
-
-    RMSE = raiz( media( (prediccion - medida)^2 ) )
-
-Se eleva al cuadrado para que los errores grandes pesen mas que los pequenos, y
-luego se toma la raiz para volver a segundos. El MAE es la media del error en
-valor absoluto: mas facil de interpretar, menos sensible a un caso extremo.
-
-Es la metrica obvia. Por si sola no es suficiente.
+Two metrics, because they answer different questions and one alone is not
+enough.
 
 
-2) VIOLACIONES DE MONOTONIA
----------------------------
-Cuantas veces el modelo predice que el neumatico RECUPERA agarre de una vuelta
-a la siguiente.
+1) RMSE (and MAE)
+-----------------
+How wrong the model is about the lap it is looking at right now.
 
-Eso es fisicamente imposible: la goma no vuelve. Y lo importante es que NINGUNA
-metrica de error lo penaliza. Un modelo puede tener un RMSE estupendo y aun asi
-decir que en la vuelta 34 el coche va a ir mas rapido que en la 33, lo cual
-hace la prediccion inservible para tomar una decision: si dice eso en la 34,
-tampoco te vas a fiar de lo que diga en la 20.
+    RMSE = sqrt( mean( (prediction - measurement)^2 ) )
 
-El valor correcto es 0 %.
+Squaring makes large errors count more than small ones, and the square root
+brings it back to seconds. MAE is the mean absolute error: easier to interpret,
+less sensitive to one extreme case.
 
-Se mide DOS VECES:
-  - dentro del stint observado
-  - extrapolando al horizonte completo de 45 vueltas
+It is the obvious metric. On its own it is not sufficient.
 
-La segunda es donde se separan los modelos, porque es donde ya no hay datos que
-sujeten la curva y lo unico que queda es lo que el modelo cree que es el mundo.
+
+2) MONOTONICITY VIOLATIONS
+--------------------------
+How often the model predicts that the tire REGAINS grip from one lap to the
+next.
+
+That is physically impossible: rubber does not come back. And the important
+part is that NO error metric penalises it. A model can have a fine RMSE and
+still say that on lap 34 the car will be faster than on lap 33, which makes the
+prediction useless for a decision: if it says that on lap 34, you will not trust
+what it says on lap 20 either.
+
+The correct value is 0 %.
+
+It is measured TWICE:
+  - inside the observed stint
+  - extrapolating to the full 45-lap horizon
+
+The second is where the models separate, because that is where no data holds
+the curve down and all that is left is what the model believes the world is.
 """
 
 from __future__ import annotations
@@ -45,103 +46,103 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from physics import HORIZONTE_VUELTAS
+from physics import STRATEGY_HORIZON
 
 
 @dataclass
-class Metricas:
-    """El resultado de evaluar un modelo sobre un conjunto de stints."""
+class Metrics:
+    """The result of evaluating one model over a set of stints."""
 
-    nombre: str
+    name: str
     rmse: float
     mae: float
-    error_max: float
-    violaciones_dentro: float
-    violaciones_extrapolando: float
+    max_error: float
+    violations_inside: float
+    violations_extrapolating: float
 
-    def fila(self) -> str:
+    def row(self) -> str:
+        """One aligned line of the results table."""
         return (
-            f"{self.nombre:18s} {self.rmse:8.3f} {self.mae:8.3f} {self.error_max:9.3f} "
-            f"{100 * self.violaciones_dentro:10.1f}% {100 * self.violaciones_extrapolando:11.1f}%"
+            f"{self.name:18s} {self.rmse:8.3f} {self.mae:8.3f} {self.max_error:9.3f} "
+            f"{100 * self.violations_inside:9.1f}% {100 * self.violations_extrapolating:11.1f}%"
         )
 
 
-CABECERA = (
-    f"{'Modelo':18s} {'RMSE':>8s} {'MAE':>8s} {'ErrorMax':>9s} "
-    f"{'ViolDentro':>11s} {'ViolExtrap':>12s}"
+HEADER = (
+    f"{'Model':18s} {'RMSE':>8s} {'MAE':>8s} {'MaxErr':>9s} "
+    f"{'ViolIn':>10s} {'ViolExtrap':>12s}"
 )
 
 
-def _contar_violaciones(delta: np.ndarray, tolerancia: float = 1e-3) -> tuple[int, int]:
-    """Cuenta los pasos de una vuelta a la siguiente en los que el ritmo MEJORA.
+def _count_violations(delta: np.ndarray, tolerance: float = 1e-3) -> tuple[int, int]:
+    """Count lap-to-lap steps where the predicted pace IMPROVES.
 
-    Devuelve (violaciones, pasos_totales). La tolerancia evita contar como
-    violacion una mejora de una millonesima de segundo, que solo seria ruido
-    numerico.
+    Returns (violations, total_steps). The tolerance avoids counting a
+    one-millionth-of-a-second improvement, which would only be numerical noise.
     """
     if delta.size < 2:
         return 0, 0
-    diferencias = np.diff(np.asarray(delta, dtype=float))
-    return int((diferencias < -tolerancia).sum()), int(diferencias.size)
+    differences = np.diff(np.asarray(delta, dtype=float))
+    return int((differences < -tolerance).sum()), int(differences.size)
 
 
-def evaluar(nombre: str, predecir_stint, stints) -> Metricas:
-    """Mide cualquier modelo que exponga predecir_stint(contexto, vueltas).
+def evaluate(name: str, predict_stint, stints) -> Metrics:
+    """Measure any model exposing predict_stint(context, laps).
 
-    Que los dos modelos compartan esa firma no es un detalle de estilo: es lo
-    que garantiza que se les esta preguntando exactamente lo mismo.
+    That both models share this signature is not a style detail: it is what
+    guarantees they are being asked exactly the same question.
     """
-    errores = []
-    viol_dentro = pasos_dentro = 0
-    viol_extrap = pasos_extrap = 0
+    errors = []
+    viol_inside = steps_inside = 0
+    viol_extrap = steps_extrap = 0
 
-    horizonte = np.arange(1, HORIZONTE_VUELTAS + 1)
+    horizon = np.arange(1, STRATEGY_HORIZON + 1)
 
     for stint in stints:
-        # --- dentro del stint observado ---
-        prediccion = np.asarray(
-            predecir_stint(stint.contexto, stint.vueltas), dtype=float
+        # --- inside the observed stint ---
+        prediction = np.asarray(
+            predict_stint(stint.context, stint.laps), dtype=float
         ).ravel()
-        errores.append(prediccion - stint.delta)
+        errors.append(prediction - stint.delta)
 
-        v, t = _contar_violaciones(prediccion)
-        viol_dentro += v
-        pasos_dentro += t
+        v, t = _count_violations(prediction)
+        viol_inside += v
+        steps_inside += t
 
-        # --- extrapolando: se le pide el stint entero hasta el horizonte ---
-        prediccion_larga = np.asarray(
-            predecir_stint(stint.contexto, horizonte), dtype=float
+        # --- extrapolating: the whole stint is asked for, out to the horizon ---
+        long_prediction = np.asarray(
+            predict_stint(stint.context, horizon), dtype=float
         ).ravel()
 
-        v, t = _contar_violaciones(prediccion_larga)
+        v, t = _count_violations(long_prediction)
         viol_extrap += v
-        pasos_extrap += t
+        steps_extrap += t
 
-    error = np.concatenate(errores)
+    error = np.concatenate(errors)
 
-    return Metricas(
-        nombre=nombre,
+    return Metrics(
+        name=name,
         rmse=float(np.sqrt(np.mean(error ** 2))),
         mae=float(np.mean(np.abs(error))),
-        error_max=float(np.max(np.abs(error))),
-        violaciones_dentro=viol_dentro / pasos_dentro if pasos_dentro else 0.0,
-        violaciones_extrapolando=viol_extrap / pasos_extrap if pasos_extrap else 0.0,
+        max_error=float(np.max(np.abs(error))),
+        violations_inside=viol_inside / steps_inside if steps_inside else 0.0,
+        violations_extrapolating=viol_extrap / steps_extrap if steps_extrap else 0.0,
     )
 
 
-def recuperacion_de_parametros(estimados, reales, nombres) -> list[tuple]:
-    """Compara las constantes estimadas con las verdaderas.
+def parameter_recovery(learned, truth, names) -> list[tuple]:
+    """Compare the estimated constants against the true ones.
 
-    Solo tiene sentido con datos sinteticos. Con datos reales no existe ninguna
-    verdad de referencia contra la que comparar, y ese es precisamente el
-    motivo de tener un banco sintetico.
+    This only makes sense with synthetic data. With real data there is no
+    ground truth to compare against, and that is exactly why a synthetic bench
+    exists.
 
-    Devuelve (nombre, estimado, real, error relativo en %).
+    Returns (name, estimated, true, relative error in %).
     """
-    filas = []
-    for nombre in nombres:
-        estimado = float(getattr(estimados, nombre))
-        real = float(getattr(reales, nombre))
-        error = 100.0 * abs(estimado - real) / abs(real) if real else float("nan")
-        filas.append((nombre, estimado, real, error))
-    return filas
+    rows = []
+    for name in names:
+        estimated = float(getattr(learned, name))
+        true = float(getattr(truth, name))
+        error = 100.0 * abs(estimated - true) / abs(true) if true else float("nan")
+        rows.append((name, estimated, true, error))
+    return rows

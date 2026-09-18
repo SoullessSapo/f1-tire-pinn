@@ -1,24 +1,24 @@
 """
-ENTRENAR Y COMPARAR
-===================
+TRAIN AND COMPARE
+=================
 
-    python run.py                                  # datos sinteticos
-    python run.py --quick                          # version corta, para probar
-    python run.py --fuente csv --csv datos/2023.csv  # datos reales descargados
+    python run.py                                 # synthetic data
+    python run.py --quick                         # short run, just to check
+    python run.py --source csv --csv data/2023.csv  # real downloaded data
 
-    python run.py --neuronas 96 --capas 5          # red mas grande
-    python run.py --stints 64 --iteraciones 12000  # entrenamiento mas largo
+    python run.py --width 96 --layers 5           # bigger network
+    python run.py --stints 64 --iterations 12000  # longer training
 
-El programa hace cuatro cosas, en este orden:
+The program does four things, in this order:
 
-  1. consigue los stints (simulados o del CSV que bajo descargar_datos.py)
-  2. los parte en entrenamiento y prueba, POR STINT ENTERO
-  3. entrena el PINN y ajusta el baseline lineal sobre los mismos datos
-  4. mide a los dos sobre los stints que ninguno ha visto, y dibuja
+  1. get the stints (simulated, or from the CSV download_data.py produced)
+  2. split them into train and test, BY WHOLE STINT
+  3. train the PINN and fit the linear baseline on the same data
+  4. measure both on stints neither has seen, and plot
 
-Con datos sinteticos hace ademas una quinta cosa que con datos reales es
-imposible: comprobar si el PINN ha recuperado las constantes fisicas
-verdaderas. Esa es la prueba de que el metodo funciona.
+With synthetic data it also does a fifth thing that is impossible with real
+data: check whether the PINN recovered the true physical constants. That is the
+proof that the method works.
 """
 
 from __future__ import annotations
@@ -29,304 +29,358 @@ from pathlib import Path
 
 import matplotlib
 
-# Backend sin pantalla. Tiene que ir ANTES de importar pyplot, porque pyplot
-# elige backend al importarse. Sin esto el script falla en un servidor.
+# Headless backend. It has to come BEFORE importing pyplot, because pyplot
+# picks its backend on import. Without this the script fails on a server.
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 import data
-from baseline import BaselineLineal
-from evaluate import CABECERA, evaluar, recuperacion_de_parametros
+from baseline import LinearBaseline
+from evaluate import HEADER, evaluate, parameter_recovery
 from physics import (
-    HORIZONTE_VUELTAS,
-    PARAMETROS_LIBRES,
-    VALORES_REALES,
-    VUELTAS_REF,
-    solucion_exacta,
+    GROUND_TRUTH,
+    LAP_REF,
+    LEARNABLE_PARAMS,
+    STRATEGY_HORIZON,
+    exact_solution,
 )
 from pinn import PINN
 
-COLORES = {
+COLORS = {
     "pinn": "#B93A24",
-    "lineal": "#7C8593",
-    "exacta": "#2C6C8C",
-    "medido": "#14181F",
+    "linear": "#7C8593",
+    "exact": "#2C6C8C",
+    "measured": "#14181F",
 }
 
 
 # ---------------------------------------------------------------------------
-# LINEA DE COMANDOS
+# COMMAND LINE
 # ---------------------------------------------------------------------------
 
-def parsear_argumentos() -> argparse.Namespace:
+def parse_args() -> argparse.Namespace:
+    """Define and read the command-line options, grouped by what they affect."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    g = p.add_argument_group("de donde salen los datos")
-    g.add_argument("--fuente", choices=["sintetico", "csv"], default="sintetico")
-    g.add_argument("--csv", default="datos/carreras.csv",
-                   help="fichero que produjo descargar_datos.py")
+    g = p.add_argument_group("where the data comes from")
+    g.add_argument("--source", choices=["synthetic", "csv"], default="synthetic")
+    g.add_argument("--csv", default="data/races.csv",
+                   help="the file download_data.py produced")
     g.add_argument("--stints", type=int, default=48,
-                   help="cuantos stints simular (solo con --fuente sintetico)")
-    g.add_argument("--ruido", type=float, default=0.05,
-                   help="ruido de cronometraje en segundos (solo sintetico)")
-    g.add_argument("--min-vueltas", type=int, default=8,
-                   help="descartar stints mas cortos que esto (solo con --fuente csv)")
+                   help="how many stints to simulate (only with --source synthetic)")
+    g.add_argument("--noise", type=float, default=0.05,
+                   help="timing noise in seconds (synthetic only)")
+    g.add_argument("--min-laps", type=int, default=8,
+                   help="discard shorter stints (only with --source csv)")
 
-    g = p.add_argument_group("la red")
-    g.add_argument("--neuronas", type=int, default=64, help="neuronas por capa")
-    g.add_argument("--capas", type=int, default=4, help="numero de capas ocultas")
-    g.add_argument("--iteraciones", type=int, default=8000)
-    g.add_argument("--colocacion", type=int, default=2000,
-                   help="puntos donde se exige la ecuacion en cada iteracion")
-    g.add_argument("--lr", type=float, default=3e-3, help="tasa de aprendizaje")
+    g = p.add_argument_group("the network")
+    g.add_argument("--width", type=int, default=64, help="neurons per layer")
+    g.add_argument("--layers", type=int, default=4, help="number of hidden layers")
+    g.add_argument("--iterations", type=int, default=8000)
+    g.add_argument("--collocation", type=int, default=2000,
+                   help="points where the equation is enforced each iteration")
+    g.add_argument("--lr", type=float, default=3e-3, help="learning rate")
 
-    g = p.add_argument_group("otros")
-    g.add_argument("--semilla", type=int, default=0)
-    g.add_argument("--salida", default="outputs")
+    g = p.add_argument_group("other")
+    g.add_argument("--seed", type=int, default=0)
+    g.add_argument("--out", default="outputs")
     g.add_argument("--quick", action="store_true",
-                   help="1500 iteraciones y 18 stints, para comprobar que corre")
+                   help="1500 iterations and 18 stints, just to check it runs")
 
     return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# GRAFICAS
+# PLOTS
 # ---------------------------------------------------------------------------
 
-def grafica_ajuste(modelos: dict, stints, sintetico: bool, ruta: Path) -> None:
-    """Un panel por compuesto: lo medido, lo exacto y lo que dice cada modelo.
+def _draw_stint_panel(ax, stint, models: dict, synthetic: bool, horizon) -> None:
+    """Draw one compound's panel: the shaded data region, then every curve."""
+    # Everything left of the dashed line is where data exists.
+    ax.axvspan(1, stint.laps[-1], color="#000000", alpha=0.05, lw=0)
+    ax.axvline(stint.laps[-1], color="#7C8593", ls="--", lw=1)
 
-    La zona sombreada es donde HAY datos. A su derecha todos los modelos estan
-    extrapolando, y ahi es donde se ve la diferencia entre tener fisica dentro
-    y no tenerla.
+    ax.plot(stint.laps, stint.delta, "o", ms=3.5,
+            color=COLORS["measured"], label="measured (with noise)")
+
+    if synthetic:
+        exact_d = exact_solution(horizon / LAP_REF, stint.context, GROUND_TRUTH)
+        ax.plot(horizon, GROUND_TRUTH.gamma1 * exact_d,
+                color=COLORS["exact"], lw=4, alpha=0.85, label="exact solution")
+
+    ax.plot(horizon, models["PINN"].predict_stint(stint.context, horizon),
+            color=COLORS["pinn"], lw=1.7, label="PINN")
+    ax.plot(horizon, models["Linear"].predict_stint(stint.context, horizon),
+            color=COLORS["linear"], lw=1.8, ls="-.", label="linear")
+
+    ax.set_title(f"{stint.compound}  ({stint.stint_id})", fontsize=10)
+    ax.set_xlabel("stint lap")
+    ax.grid(alpha=0.15)
+
+
+def plot_fit(models: dict, stints, synthetic: bool, path: Path) -> None:
+    """One panel per compound: what was measured, the exact curve, both models.
+
+    The shaded area is where data EXISTS. To its right every model is
+    extrapolating, and that is where having physics inside starts to show.
     """
-    # Un stint representativo de cada compuesto.
-    por_compuesto: dict[str, object] = {}
+    # One representative stint per compound.
+    by_compound: dict[str, object] = {}
     for stint in stints:
-        por_compuesto.setdefault(stint.compuesto, stint)
-    orden = [c for c in ("SOFT", "MEDIUM", "HARD") if c in por_compuesto]
-    if not orden:
-        orden = list(por_compuesto)[:3]
+        by_compound.setdefault(stint.compound, stint)
+    order = [c for c in ("SOFT", "MEDIUM", "HARD") if c in by_compound]
+    if not order:
+        order = list(by_compound)[:3]
 
-    fig, ejes = plt.subplots(
-        1, len(orden), figsize=(4.3 * len(orden), 3.7), sharey=True, squeeze=False
+    fig, axes = plt.subplots(
+        1, len(order), figsize=(4.3 * len(order), 3.7), sharey=True, squeeze=False
     )
-    horizonte = np.arange(1, HORIZONTE_VUELTAS + 1)
+    horizon = np.arange(1, STRATEGY_HORIZON + 1)
 
-    for eje, compuesto in zip(ejes[0], orden):
-        stint = por_compuesto[compuesto]
+    for ax, compound in zip(axes[0], order):
+        _draw_stint_panel(ax, by_compound[compound], models, synthetic, horizon)
 
-        eje.axvspan(1, stint.vueltas[-1], color="#000000", alpha=0.05, lw=0)
-        eje.axvline(stint.vueltas[-1], color="#7C8593", ls="--", lw=1)
-
-        eje.plot(stint.vueltas, stint.delta, "o", ms=3.5,
-                 color=COLORES["medido"], label="medido (con ruido)")
-
-        if sintetico:
-            d_exacto = solucion_exacta(horizonte / VUELTAS_REF, stint.contexto, VALORES_REALES)
-            eje.plot(horizonte, VALORES_REALES.gamma1 * d_exacto,
-                     color=COLORES["exacta"], lw=4, alpha=0.85, label="solucion exacta")
-
-        eje.plot(horizonte, modelos["PINN"].predecir_stint(stint.contexto, horizonte),
-                 color=COLORES["pinn"], lw=1.7, label="PINN")
-        eje.plot(horizonte, modelos["Lineal"].predecir_stint(stint.contexto, horizonte),
-                 color=COLORES["lineal"], lw=1.8, ls="-.", label="lineal")
-
-        eje.set_title(f"{compuesto}  ({stint.stint_id})", fontsize=10)
-        eje.set_xlabel("vuelta del stint")
-        eje.grid(alpha=0.15)
-
-    ejes[0][0].set_ylabel("perdida de ritmo [s]")
-    ejes[0][-1].legend(fontsize=7.5, loc="upper left")
+    axes[0][0].set_ylabel("pace loss [s]")
+    axes[0][-1].legend(fontsize=7.5, loc="upper left")
     fig.suptitle(
-        "A la derecha de la linea discontinua, todos los modelos extrapolan",
+        "To the right of the dashed line, every model is extrapolating",
         fontsize=9.5, y=1.0,
     )
     fig.tight_layout()
-    fig.savefig(ruta, dpi=140, bbox_inches="tight")
+    fig.savefig(path, dpi=140, bbox_inches="tight")
     plt.close(fig)
 
 
-def grafica_entrenamiento(modelo: PINN, ruta: Path) -> None:
-    """Como bajan los tres terminos del coste."""
-    historial = modelo.historial
-    iteraciones = [h["iteracion"] for h in historial]
+def plot_training(model: PINN, path: Path) -> None:
+    """How the three terms of the loss come down."""
+    history = model.history
+    iterations = [h["iteration"] for h in history]
 
-    fig, eje = plt.subplots(figsize=(6.4, 3.8))
-    for clave, etiqueta, color in [
-        ("fisica", "fisica (residuo de la ecuacion)", COLORES["exacta"]),
-        ("datos", "datos (ritmo medido)", COLORES["pinn"]),
-        ("ci", "condicion inicial d(0)=0", COLORES["lineal"]),
+    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    for key, label, color in [
+        ("physics", "physics (equation residual)", COLORS["exact"]),
+        ("data", "data (measured pace)", COLORS["pinn"]),
+        ("ic", "initial condition d(0)=0", COLORS["linear"]),
     ]:
-        eje.plot(iteraciones, [h[clave] for h in historial], lw=1.6,
-                 color=color, label=etiqueta)
+        ax.plot(iterations, [h[key] for h in history], lw=1.6,
+                color=color, label=label)
 
-    eje.set_yscale("log")
-    eje.set_xlabel("iteracion")
-    eje.set_ylabel("coste (escala logaritmica)")
-    eje.set_title("Los tres terminos del coste", fontsize=10)
-    eje.legend(fontsize=8)
-    eje.grid(alpha=0.15)
+    ax.set_yscale("log")
+    ax.set_xlabel("iteration")
+    ax.set_ylabel("loss (log scale)")
+    ax.set_title("The three terms of the loss", fontsize=10)
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.15)
 
     fig.tight_layout()
-    fig.savefig(ruta, dpi=140, bbox_inches="tight")
+    fig.savefig(path, dpi=140, bbox_inches="tight")
     plt.close(fig)
 
 
-def grafica_parametros(modelo: PINN, sintetico: bool, ruta: Path) -> None:
-    """Las seis constantes fisicas mientras se estiman.
+def plot_parameters(model: PINN, synthetic: bool, path: Path) -> None:
+    """The six physical constants while they are being estimated.
 
-    Con datos sinteticos se dibuja tambien el valor verdadero: si las curvas
-    aterrizan en las lineas de puntos, el problema inverso ha funcionado.
+    With synthetic data the true value is drawn as well: if the curves land on
+    the dashed lines, the inverse problem worked.
     """
-    historial = modelo.historial
-    iteraciones = [h["iteracion"] for h in historial]
+    history = model.history
+    iterations = [h["iteration"] for h in history]
 
-    fig, ejes = plt.subplots(2, 3, figsize=(11, 5.4), squeeze=False)
+    fig, axes = plt.subplots(2, 3, figsize=(11, 5.4), squeeze=False)
 
-    for eje, nombre in zip(ejes.ravel(), PARAMETROS_LIBRES):
-        eje.plot(iteraciones, [h[nombre] for h in historial],
-                 lw=1.8, color=COLORES["pinn"], label="estimado")
-        if sintetico:
-            eje.axhline(float(getattr(VALORES_REALES, nombre)),
-                        color=COLORES["medido"], ls="--", lw=1.2, label="valor real")
-        eje.set_title(nombre, fontsize=10)
-        eje.set_xlabel("iteracion")
-        eje.grid(alpha=0.15)
+    for ax, name in zip(axes.ravel(), LEARNABLE_PARAMS):
+        ax.plot(iterations, [h[name] for h in history],
+                lw=1.8, color=COLORS["pinn"], label="estimated")
+        if synthetic:
+            ax.axhline(float(getattr(GROUND_TRUTH, name)),
+                       color=COLORS["measured"], ls="--", lw=1.2, label="true value")
+        ax.set_title(name, fontsize=10)
+        ax.set_xlabel("iteration")
+        ax.grid(alpha=0.15)
 
-    ejes[0][0].legend(fontsize=8)
+    axes[0][0].legend(fontsize=8)
     fig.suptitle(
-        "Problema inverso: seis constantes fisicas estimadas junto a los pesos",
+        "Inverse problem: six physical constants estimated alongside the weights",
         fontsize=10,
     )
     fig.tight_layout()
-    fig.savefig(ruta, dpi=140, bbox_inches="tight")
+    fig.savefig(path, dpi=140, bbox_inches="tight")
     plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
-# PROGRAMA PRINCIPAL
+# THE FIVE STEPS
+# ---------------------------------------------------------------------------
+#
+# main() below is a list of five calls. Each step lives in its own function so
+# that reading main() tells you WHAT happens, and opening one function tells you
+# HOW. Nothing here is clever; it is split up purely so no single function has
+# to be held in your head all at once.
+
+
+def get_stints(args) -> list | None:
+    """Step 1. Fetch the stints, from the simulator or from the CSV.
+
+    Returns None if the CSV could not be read, which main() turns into a clean
+    exit rather than a traceback.
+    """
+    if args.source == "synthetic":
+        n_stints = 18 if args.quick else args.stints
+        stints = data.generate_synthetic(
+            n_stints=n_stints, noise_s=args.noise, seed=args.seed
+        )
+        print(f"\nSource: synthetic bench (noise sigma = {args.noise} s)")
+        return stints
+
+    try:
+        stints = data.load_csv(args.csv, min_laps=args.min_laps)
+    except (FileNotFoundError, ValueError) as error:
+        # A clear message beats a twenty-line traceback.
+        print(f"\nCould not load the data:\n  {error}")
+        return None
+
+    print(f"\nSource: {args.csv}")
+    return stints
+
+
+def train_pinn(inputs, delta, args) -> PINN:
+    """Step 2. Build the network and train it, printing what it is doing."""
+    iterations = 1500 if args.quick else args.iterations
+
+    print(f"\n[1/3] Training the PINN ({iterations} Adam iterations) ...")
+    model = PINN(width=args.width, layers=args.layers, seed=args.seed)
+    print(f"      network: {args.layers} layers of {args.width} neurons, "
+          f"{model.n_weights()} weights")
+    print(f"      plus {len(LEARNABLE_PARAMS)} physical constants to estimate: "
+          f"{', '.join(LEARNABLE_PARAMS)}")
+
+    started = time.perf_counter()
+    model.train(
+        inputs, delta,
+        iterations=iterations,
+        n_collocation=args.collocation,
+        lr=args.lr,
+    )
+    print(f"      done in {time.perf_counter() - started:.1f} s")
+    return model
+
+
+def train_baseline(inputs, delta) -> LinearBaseline:
+    """Step 3. Fit the classic rival on exactly the same data."""
+    print("\n[2/3] Fitting the linear baseline ...")
+    linear = LinearBaseline().fit(inputs, delta)
+    print("      done")
+    return linear
+
+
+def _results_table(metrics) -> list[str]:
+    """The accuracy table, as a list of lines."""
+    return [HEADER, "-" * len(HEADER)] + [m.row() for m in metrics] + [
+        "",
+        "ViolIn / ViolExtrap = % of laps where the model predicts the tire",
+        "REGAINING grip. That is physically impossible: the correct value is 0 %.",
+    ]
+
+
+def _recovery_table(model: PINN) -> list[str]:
+    """The inverse-problem table. Synthetic data only, where truth exists."""
+    rows = parameter_recovery(model.learned_params(), GROUND_TRUTH, LEARNABLE_PARAMS)
+    mean_error = np.mean([r[3] for r in rows])
+
+    return [
+        "",
+        "Inverse problem: recovery of the physical constants",
+        f"{'Constant':12s} {'Estimated':>10s} {'True':>10s} {'Error':>9s}",
+        "-" * 45,
+    ] + [
+        f"{name:12s} {estimated:10.4f} {true:10.4f} {error:8.1f}%"
+        for name, estimated, true, error in rows
+    ] + [
+        f"{'':12s} {'':>10s} {'mean':>10s} {mean_error:8.1f}%"
+    ]
+
+
+def _estimates_list(model: PINN) -> list[str]:
+    """Just the estimated constants, for real data where there is no truth."""
+    learned = model.learned_params()
+    return [
+        "",
+        "Estimated physical constants (with real data there is no ground",
+        "truth to compare against):",
+    ] + [
+        f"  {name:8s} {float(getattr(learned, name)):8.4f}"
+        for name in LEARNABLE_PARAMS
+    ]
+
+
+def build_report(model: PINN, linear: LinearBaseline, test, synthetic: bool) -> str:
+    """Step 4. Measure both models and assemble the text report."""
+    print("\n[3/3] Measuring on stints neither model has seen\n")
+
+    metrics = [
+        evaluate("PINN", model.predict_stint, test),
+        evaluate("Linear (classic)", linear.predict_stint, test),
+    ]
+
+    lines = _results_table(metrics)
+    lines += _recovery_table(model) if synthetic else _estimates_list(model)
+    return "\n".join(lines)
+
+
+def save_outputs(model, linear, stints, test, report, synthetic, out: Path) -> None:
+    """Step 5. Write the three figures and the text report to disk."""
+    models = {"PINN": model, "Linear": linear}
+
+    plot_fit(models, test, synthetic, out / "01_fit.png")
+    plot_training(model, out / "02_training.png")
+    plot_parameters(model, synthetic, out / "03_parameters.png")
+
+    (out / "report.txt").write_text(
+        data.describe(stints) + "\n\n" + report + "\n", encoding="utf-8"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAIN PROGRAM
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    args = parsear_argumentos()
+    """Run the whole experiment end to end. Returns the process exit code."""
+    args = parse_args()
+    synthetic = args.source == "synthetic"
 
-    n_stints = 18 if args.quick else args.stints
-    iteraciones = 1500 if args.quick else args.iteraciones
-
-    salida = Path(args.salida)
-    salida.mkdir(parents=True, exist_ok=True)
-
-    sintetico = args.fuente == "sintetico"
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 74)
-    print("PINN de degradacion de neumaticos - v0 ampliado")
+    print("Tire degradation PINN - v0 extended")
     print("=" * 74)
 
-    # --- 1) los datos -----------------------------------------------------
-    if sintetico:
-        stints = data.generar_sinteticos(
-            n_stints=n_stints, ruido_s=args.ruido, semilla=args.semilla
-        )
-        print(f"\nFuente: banco sintetico (ruido sigma = {args.ruido} s)")
-    else:
-        try:
-            stints = data.cargar_csv(args.csv, min_vueltas=args.min_vueltas)
-        except (FileNotFoundError, ValueError) as error:
-            # Un mensaje claro vale mas que una traza de error de veinte lineas.
-            print(f"\nNo se pudieron cargar los datos:\n  {error}")
-            return 1
-        print(f"\nFuente: {args.csv}")
+    # 1) the data
+    stints = get_stints(args)
+    if stints is None:
+        return 1
+    print(data.describe(stints))
 
-    print(data.resumen(stints))
+    train, test = data.split(stints, seed=args.seed)
+    print(f"  Split by whole stint: {len(train)} to train / {len(test)} to test")
+    inputs, delta = data.flatten(train)
 
-    entrenamiento, prueba = data.partir(stints, semilla=args.semilla)
-    print(f"  Particion por stint entero: {len(entrenamiento)} entrenar "
-          f"/ {len(prueba)} probar")
+    # 2) and 3) the two models, on the same data
+    model = train_pinn(inputs, delta, args)
+    linear = train_baseline(inputs, delta)
 
-    entradas, delta = data.aplanar(entrenamiento)
+    # 4) measure
+    report = build_report(model, linear, test, synthetic)
+    print(report)
 
-    # --- 2) el PINN -------------------------------------------------------
-    print(f"\n[1/3] Entrenando el PINN ({iteraciones} iteraciones de Adam) ...")
-    modelo = PINN(neuronas=args.neuronas, capas=args.capas, semilla=args.semilla)
-    print(f"      red: {args.capas} capas de {args.neuronas} neuronas, "
-          f"{modelo.n_parametros_red()} pesos")
-    print(f"      mas {len(PARAMETROS_LIBRES)} constantes fisicas a estimar: "
-          f"{', '.join(PARAMETROS_LIBRES)}")
-
-    t0 = time.perf_counter()
-    modelo.entrenar(
-        entradas, delta,
-        iteraciones=iteraciones,
-        n_colocacion=args.colocacion,
-        lr=args.lr,
-    )
-    print(f"      listo en {time.perf_counter() - t0:.1f} s")
-
-    # --- 3) el rival ------------------------------------------------------
-    print("\n[2/3] Ajustando el baseline lineal ...")
-    lineal = BaselineLineal().ajustar(entradas, delta)
-    print("      listo")
-
-    # --- 4) medir ---------------------------------------------------------
-    print("\n[3/3] Midiendo sobre stints que ninguno ha visto\n")
-    modelos = {"PINN": modelo, "Lineal": lineal}
-    metricas = [
-        evaluar("PINN", modelo.predecir_stint, prueba),
-        evaluar("Lineal clasico", lineal.predecir_stint, prueba),
-    ]
-
-    lineas = [CABECERA, "-" * len(CABECERA)] + [m.fila() for m in metricas]
-    lineas += [
-        "",
-        "ViolDentro / ViolExtrap = % de vueltas donde el modelo predice que el",
-        "neumatico RECUPERA agarre. Es fisicamente imposible: el valor correcto es 0 %.",
-    ]
-
-    if sintetico:
-        estimados = modelo.parametros_estimados()
-        filas = recuperacion_de_parametros(estimados, VALORES_REALES, PARAMETROS_LIBRES)
-        lineas += [
-            "",
-            "Problema inverso: recuperacion de las constantes fisicas",
-            f"{'Constante':12s} {'Estimado':>10s} {'Real':>10s} {'Error':>9s}",
-            "-" * 45,
-        ]
-        lineas += [
-            f"{n:12s} {est:10.4f} {real:10.4f} {err:8.1f}%"
-            for n, est, real, err in filas
-        ]
-        lineas.append(
-            f"{'':12s} {'':>10s} {'media':>10s} "
-            f"{np.mean([f[3] for f in filas]):8.1f}%"
-        )
-    else:
-        estimados = modelo.parametros_estimados()
-        lineas += [
-            "",
-            "Constantes fisicas estimadas (con datos reales no hay verdad de",
-            "referencia contra la que comparar):",
-        ]
-        lineas += [
-            f"  {n:8s} {float(getattr(estimados, n)):8.4f}" for n in PARAMETROS_LIBRES
-        ]
-
-    informe = "\n".join(lineas)
-    print(informe)
-
-    # --- 5) dibujar y guardar --------------------------------------------
-    grafica_ajuste(modelos, prueba, sintetico, salida / "01_ajuste.png")
-    grafica_entrenamiento(modelo, salida / "02_entrenamiento.png")
-    grafica_parametros(modelo, sintetico, salida / "03_parametros.png")
-    (salida / "report.txt").write_text(
-        data.resumen(stints) + "\n\n" + informe + "\n", encoding="utf-8"
-    )
-
-    print(f"\nFiguras e informe en {salida.resolve()}")
+    # 5) save
+    save_outputs(model, linear, stints, test, report, synthetic, out)
+    print(f"\nFigures and report in {out.resolve()}")
     return 0
 
 

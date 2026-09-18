@@ -1,33 +1,33 @@
 """
-DE DONDE SALEN LOS STINTS
-=========================
+WHERE THE STINTS COME FROM
+==========================
 
-Un "stint" es un juego de neumaticos: desde que el coche sale de boxes hasta
-que vuelve a entrar. Es la unidad de aprendizaje de todo el proyecto. La red
-nunca ve vueltas sueltas, porque la fisica que se le impone es una ecuacion en
-el tiempo DENTRO de un stint.
+A "stint" is one set of tires: from the moment the car leaves the pits until it
+comes back in. It is the unit of learning for the whole project. The network
+never sees isolated laps, because the physics imposed on it is an equation in
+time WITHIN a stint.
 
-Este fichero sabe construir stints de dos sitios:
+This file knows how to build stints from two places:
 
-  generar_sinteticos()  simula stints resolviendo la ecuacion con constantes
-                        conocidas y anadiendo ruido de cronometraje.
+  generate_synthetic()  simulates stints by solving the equation with known
+                        constants and adding timing noise.
 
-  cargar_csv()          lee el CSV que produce `descargar_datos.py` a partir de
-                        la telemetria real de FastF1.
+  load_csv()            reads the CSV produced by `download_data.py` from real
+                        FastF1 telemetry.
 
-Los dos devuelven exactamente lo mismo: una lista de objetos `Stint`. A partir
-de ahi, el resto del proyecto no sabe ni le importa de donde vinieron.
+Both return exactly the same thing: a list of `Stint` objects. From there on,
+the rest of the project neither knows nor cares where they came from.
 
 
-POR QUE EMPEZAR POR LOS SINTETICOS
-----------------------------------
-Porque de ellos se conoce la respuesta. Con datos sinteticos se sabe cuanto
-valen de verdad las constantes fisicas y cuanto vale de verdad el desgaste d en
-cada vuelta, asi que se puede comprobar si el modelo acierta. Con datos reales
-eso es imposible: nadie publica el estado de la banda de rodadura.
+WHY START WITH SYNTHETIC DATA
+-----------------------------
+Because the answer is known. With synthetic data you know what the physical
+constants really are and what the wear d really is on every lap, so you can
+check whether the model gets it right. With real data that is impossible:
+nobody publishes the state of the tread.
 
-Si el modelo no recupera las constantes en el banco sintetico, apuntarlo a
-datos reales solo sirve para obtener numeros equivocados con mas trabajo.
+If the model cannot recover the constants on the synthetic bench, pointing it
+at real data only produces wrong numbers with more effort.
 """
 
 from __future__ import annotations
@@ -39,105 +39,107 @@ from pathlib import Path
 import numpy as np
 
 from physics import (
-    INDICE_COMPUESTO,
-    RANGOS_CONTEXTO,
-    VALORES_REALES,
-    VUELTAS_REF,
-    Contexto,
-    ParametrosFisicos,
-    integrar_stint,
-    perdida_ritmo,
+    COMPOUND_INDEX,
+    CONTEXT_RANGES,
+    GROUND_TRUTH,
+    LAP_REF,
+    Context,
+    TireParams,
+    integrate_stint,
+    pace_loss,
 )
 
-_COMPUESTOS = ("SOFT", "MEDIUM", "HARD")
+_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
 
 
 # ---------------------------------------------------------------------------
-# 1) LA UNIDAD DE DATOS
+# 1) THE UNIT OF DATA
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Stint:
-    """Un juego de neumaticos, de boxes a boxes."""
+    """One set of tires, pits to pits."""
 
     stint_id: str
-    contexto: Contexto        # las 5 condiciones, constantes en todo el stint
-    vueltas: np.ndarray       # vuelta dentro del stint: 1, 2, 3, ...
-    delta: np.ndarray         # perdida de ritmo MEDIDA [s] (lleva ruido)
+    context: Context          # the 5 conditions, constant across the stint
+    laps: np.ndarray          # lap within the stint: 1, 2, 3, ...
+    delta: np.ndarray         # MEASURED pace loss [s] (carries noise)
 
-    # Solo existen en los stints sinteticos, donde se conoce la verdad.
-    # Se usan para comprobar, jamas para entrenar.
-    d_real: np.ndarray | None = None
-    delta_sin_ruido: np.ndarray | None = None
+    # These only exist on synthetic stints, where the truth is known.
+    # They are used for checking, never for training.
+    d_true: np.ndarray | None = None
+    delta_clean: np.ndarray | None = None
 
     @property
-    def n_vueltas(self) -> int:
-        return int(self.vueltas.size)
+    def n_laps(self) -> int:
+        """How many laps this stint lasted."""
+        return int(self.laps.size)
 
     @property
     def tau(self) -> np.ndarray:
-        """El tiempo adimensional de cada vuelta."""
-        return self.vueltas / VUELTAS_REF
+        """The dimensionless time of each lap."""
+        return self.laps / LAP_REF
 
     @property
-    def compuesto(self) -> str:
-        return self.contexto.nombre_compuesto
+    def compound(self) -> str:
+        """The compound name (SOFT/MEDIUM/HARD), for labels and grouping."""
+        return self.context.compound_name
 
 
 # ---------------------------------------------------------------------------
-# 2) STINTS SINTETICOS
+# 2) SYNTHETIC STINTS
 # ---------------------------------------------------------------------------
 
-def _sortear_contexto(rng: np.random.Generator, compuesto: str) -> Contexto:
-    """Sortea unas condiciones plausibles para un compuesto dado."""
-    valores = {}
-    for nombre, (bajo, alto) in RANGOS_CONTEXTO.items():
-        valores[nombre] = float(rng.uniform(bajo, alto))
-    # El compuesto no se sortea: lo decide quien llama.
-    valores["compuesto"] = INDICE_COMPUESTO[compuesto]
-    return Contexto(**valores)
+def _sample_context(rng: np.random.Generator, compound: str) -> Context:
+    """Draw plausible conditions for a given compound."""
+    values = {}
+    for name, (low, high) in CONTEXT_RANGES.items():
+        values[name] = float(rng.uniform(low, high))
+    # The compound is not drawn: the caller decides it.
+    values["compound"] = COMPOUND_INDEX[compound]
+    return Context(**values)
 
 
-def generar_sinteticos(
-    n_stints: int = 24,
-    p: ParametrosFisicos = VALORES_REALES,
-    ruido_s: float = 0.05,
-    min_vueltas: int = 12,
-    max_vueltas: int = 30,
-    semilla: int = 0,
+def generate_synthetic(
+    n_stints: int = 48,
+    p: TireParams = GROUND_TRUTH,
+    noise_s: float = 0.05,
+    min_laps: int = 12,
+    max_laps: int = 30,
+    seed: int = 0,
 ) -> list[Stint]:
-    """Genera `n_stints` stints simulados, rotando entre los tres compuestos.
+    """Generate `n_stints` simulated stints, cycling through the three compounds.
 
-    El ruido importa y no es decorativo. Sin el, el ajuste es trivial y el
-    termino de fisica de la perdida no tiene nada que hacer. Con el, se nota
-    enseguida la diferencia entre un modelo que persigue el ruido y uno que
-    esta sujeto por una ecuacion.
+    The noise matters and is not decoration. Without it the fit is trivial and
+    the physics term of the loss has nothing to do. With it, the difference
+    between a model that chases the noise and one held down by an equation
+    shows up immediately.
     """
-    rng = np.random.default_rng(semilla)
+    rng = np.random.default_rng(seed)
     stints: list[Stint] = []
 
     for i in range(n_stints):
-        compuesto = _COMPUESTOS[i % len(_COMPUESTOS)]
-        contexto = _sortear_contexto(rng, compuesto)
-        n_vueltas = int(rng.integers(min_vueltas, max_vueltas + 1))
+        compound = _COMPOUNDS[i % len(_COMPOUNDS)]
+        context = _sample_context(rng, compound)
+        n_laps = int(rng.integers(min_laps, max_laps + 1))
 
-        # 1) resolver la ecuacion -> el desgaste real vuelta a vuelta
-        vueltas, d = integrar_stint(n_vueltas, contexto, p)
+        # 1) solve the equation -> the true wear, lap by lap
+        laps, d = integrate_stint(n_laps, context, p)
 
-        # 2) traducirlo a lo unico observable: segundos perdidos
-        delta_limpio = perdida_ritmo(d, p)
+        # 2) translate it into the only observable: seconds lost
+        clean_delta = pace_loss(d, p)
 
-        # 3) ensuciarlo como lo ensucia la realidad: trafico, viento, el piloto
-        delta_medido = delta_limpio + rng.normal(0.0, ruido_s, size=delta_limpio.shape)
+        # 3) dirty it the way reality does: traffic, wind, the driver
+        measured_delta = clean_delta + rng.normal(0.0, noise_s, size=clean_delta.shape)
 
         stints.append(
             Stint(
-                stint_id=f"SIN{i:02d}",
-                contexto=contexto,
-                vueltas=vueltas,
-                delta=delta_medido,
-                d_real=d,
-                delta_sin_ruido=delta_limpio,
+                stint_id=f"SYN{i:02d}",
+                context=context,
+                laps=laps,
+                delta=measured_delta,
+                d_true=d,
+                delta_clean=clean_delta,
             )
         )
 
@@ -145,156 +147,164 @@ def generar_sinteticos(
 
 
 # ---------------------------------------------------------------------------
-# 3) STINTS REALES, DESDE EL CSV DESCARGADO
+# 3) REAL STINTS, FROM THE DOWNLOADED CSV
 # ---------------------------------------------------------------------------
 
-# Columnas que `cargar_csv` necesita. `descargar_datos.py` escribe estas y
-# algunas mas (tiempo de vuelta, vuelta de carrera...) para poder inspeccionar
-# el fichero a mano en una hoja de calculo.
-_COLUMNAS_REQUERIDAS = (
-    "stint_id", "vuelta_stint", "delta",
-    "q_friccion", "carga", "velocidad", "temp_pista", "compuesto",
+# Columns `load_csv` needs. `download_data.py` writes these plus a few more
+# (lap time, race lap...) so the file can be inspected by hand in a spreadsheet.
+_REQUIRED_COLUMNS = (
+    "stint_id", "stint_lap", "delta",
+    "q_fric", "load", "speed", "track_temp", "compound",
 )
 
 
-def cargar_csv(ruta: str | Path, min_vueltas: int = 8) -> list[Stint]:
-    """Lee el CSV de `descargar_datos.py` y lo convierte en stints.
-
-    El CSV tiene una fila por vuelta. Aqui se agrupan por `stint_id` y se
-    comprueba que el contexto sea de verdad constante dentro del stint, porque
-    todo el modelo se apoya en esa suposicion.
-
-    Los stints con menos de `min_vueltas` vueltas validas se descartan: con
-    cuatro puntos no se distingue una curva de una recta.
-    """
-    ruta = Path(ruta)
-    if not ruta.exists():
+def _read_rows(path: Path) -> list[dict]:
+    """Read the CSV and check it has the columns we need."""
+    if not path.exists():
         raise FileNotFoundError(
-            f"No existe {ruta}. Descarga los datos primero:\n"
-            f"  python descargar_datos.py --anio 2023 --carreras Monza --salida {ruta}"
+            f"{path} does not exist. Download the data first:\n"
+            f"  python download_data.py --year 2023 --races Monza --out {path}"
         )
 
-    with open(ruta, newline="", encoding="utf-8") as fh:
-        filas = list(csv.DictReader(fh))
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
 
-    if not filas:
-        raise ValueError(f"{ruta} esta vacio")
+    if not rows:
+        raise ValueError(f"{path} is empty")
 
-    faltan = [c for c in _COLUMNAS_REQUERIDAS if c not in filas[0]]
-    if faltan:
-        raise ValueError(f"A {ruta} le faltan columnas: {', '.join(faltan)}")
+    missing = [c for c in _REQUIRED_COLUMNS if c not in rows[0]]
+    if missing:
+        raise ValueError(f"{path} is missing columns: {', '.join(missing)}")
 
-    # Agrupar las filas por stint, conservando el orden de aparicion.
-    grupos: dict[str, list[dict]] = {}
-    for fila in filas:
-        grupos.setdefault(fila["stint_id"], []).append(fila)
+    return rows
+
+
+def _stint_from_rows(stint_id: str, rows: list[dict]) -> Stint:
+    """Build one Stint from its already-sorted rows.
+
+    The context is taken from the first row. `download_data.py` writes the same
+    value on every row of a stint (it uses the stint median), so any row will do.
+    """
+    first = rows[0]
+    return Stint(
+        stint_id=stint_id,
+        context=Context(
+            q_fric=float(first["q_fric"]),
+            load=float(first["load"]),
+            speed=float(first["speed"]),
+            track_temp=float(first["track_temp"]),
+            compound=float(first["compound"]),
+        ),
+        laps=np.array([float(r["stint_lap"]) for r in rows]),
+        delta=np.array([float(r["delta"]) for r in rows]),
+    )
+
+
+def load_csv(path: str | Path, min_laps: int = 8) -> list[Stint]:
+    """Read the CSV from `download_data.py` and turn it into stints.
+
+    The CSV has one row per lap. Here they are grouped by `stint_id`, since the
+    whole model rests on the context being constant within a stint.
+
+    Stints with fewer than `min_laps` valid laps are discarded: with four
+    points you cannot tell a curve from a straight line.
+    """
+    path = Path(path)
+    rows = _read_rows(path)
+
+    # Group by stint, keeping the order they appeared in.
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row["stint_id"], []).append(row)
 
     stints: list[Stint] = []
-    descartados = 0
+    discarded = 0
 
-    for stint_id, filas_stint in grupos.items():
-        filas_stint.sort(key=lambda f: float(f["vuelta_stint"]))
-
-        if len(filas_stint) < min_vueltas:
-            descartados += 1
+    for stint_id, stint_rows in groups.items():
+        stint_rows.sort(key=lambda r: float(r["stint_lap"]))
+        if len(stint_rows) < min_laps:
+            discarded += 1
             continue
-
-        vueltas = np.array([float(f["vuelta_stint"]) for f in filas_stint])
-        delta = np.array([float(f["delta"]) for f in filas_stint])
-
-        # El contexto se toma de la primera fila. `descargar_datos.py` ya
-        # escribe el mismo valor en todas las filas del stint (usa la mediana
-        # del stint), asi que cualquiera sirve.
-        primera = filas_stint[0]
-        contexto = Contexto(
-            q_friccion=float(primera["q_friccion"]),
-            carga=float(primera["carga"]),
-            velocidad=float(primera["velocidad"]),
-            temp_pista=float(primera["temp_pista"]),
-            compuesto=float(primera["compuesto"]),
-        )
-
-        stints.append(Stint(stint_id=stint_id, contexto=contexto,
-                            vueltas=vueltas, delta=delta))
+        stints.append(_stint_from_rows(stint_id, stint_rows))
 
     if not stints:
         raise ValueError(
-            f"Ningun stint de {ruta} llega a {min_vueltas} vueltas validas. "
-            "Baja --min-vueltas o descarga mas carreras."
+            f"No stint in {path} reaches {min_laps} valid laps. "
+            "Lower --min-laps or download more races."
         )
 
-    if descartados:
-        print(f"  {descartados} stints descartados por tener menos de {min_vueltas} vueltas")
+    if discarded:
+        print(f"  {discarded} stints discarded for having fewer than {min_laps} laps")
 
     return stints
 
 
 # ---------------------------------------------------------------------------
-# 4) PARTIR EN ENTRENAMIENTO Y PRUEBA
+# 4) SPLITTING INTO TRAIN AND TEST
 # ---------------------------------------------------------------------------
 
-def partir(
-    stints: list[Stint], fraccion_prueba: float = 0.25, semilla: int = 0
+def split(
+    stints: list[Stint], test_fraction: float = 0.25, seed: int = 0
 ) -> tuple[list[Stint], list[Stint]]:
-    """Partir por STINT ENTERO, nunca por vuelta.
+    """Split by WHOLE STINT, never by lap.
 
-    Si se partiera por vuelta, las vueltas 5 y 6 del mismo juego acabarian una
-    en entrenamiento y otra en prueba. El modelo se estaria evaluando sobre una
-    curva que ya ha visto a medias: eso es fuga de informacion, y ademas es la
-    peor clase de fuga, porque mejora a TODOS los modelos por igual y por tanto
-    no se nota comparandolos entre si.
+    Splitting by lap would put laps 5 and 6 of the same set on opposite sides
+    of the split. The model would then be evaluated on a curve it has already
+    partly seen: that is information leakage, and it is the worst kind, because
+    it improves ALL models equally and therefore cannot be spotted by comparing
+    them against each other.
     """
-    rng = np.random.default_rng(semilla)
-    orden = rng.permutation(len(stints))
-    n_prueba = max(1, round(fraccion_prueba * len(stints)))
-    indices_prueba = set(orden[:n_prueba].tolist())
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(stints))
+    n_test = max(1, round(test_fraction * len(stints)))
+    test_indices = set(order[:n_test].tolist())
 
-    entrenamiento = [s for i, s in enumerate(stints) if i not in indices_prueba]
-    prueba = [s for i, s in enumerate(stints) if i in indices_prueba]
-    return entrenamiento, prueba
+    train = [s for i, s in enumerate(stints) if i not in test_indices]
+    test = [s for i, s in enumerate(stints) if i in test_indices]
+    return train, test
 
 
-def aplanar(stints: list[Stint]) -> tuple[np.ndarray, np.ndarray]:
-    """Convierte una lista de stints en las dos matrices que entrena la red.
+def flatten(stints: list[Stint]) -> tuple[np.ndarray, np.ndarray]:
+    """Turn a list of stints into the two matrices that train the network.
 
-    Devuelve:
-      entradas  (N, 6)  cada fila es [tau, y las 5 variables de contexto]
-      delta     (N, 1)  la perdida de ritmo medida en esa vuelta
+    Returns:
+      inputs  (N, 6)  each row is [tau, and the 5 context variables]
+      delta   (N, 1)  the pace loss measured on that lap
 
-    El contexto es constante dentro del stint, asi que se REPITE en cada una de
-    sus vueltas. Eso es lo que permite que la red aprenda a la vez el efecto del
-    tiempo y el de las condiciones.
+    The context is constant within the stint, so it is REPEATED on each of its
+    laps. That is what lets the network learn the effect of time and the effect
+    of conditions at the same time.
     """
-    bloques_entrada = []
-    bloques_delta = []
+    input_blocks = []
+    delta_blocks = []
 
     for s in stints:
         tau = s.tau.reshape(-1, 1)
-        contexto_repetido = np.tile(s.contexto.vector().reshape(1, -1), (tau.shape[0], 1))
-        bloques_entrada.append(np.hstack([tau, contexto_repetido]))
-        bloques_delta.append(s.delta.reshape(-1, 1))
+        repeated_context = np.tile(s.context.vector().reshape(1, -1), (tau.shape[0], 1))
+        input_blocks.append(np.hstack([tau, repeated_context]))
+        delta_blocks.append(s.delta.reshape(-1, 1))
 
-    return np.vstack(bloques_entrada), np.vstack(bloques_delta)
+    return np.vstack(input_blocks), np.vstack(delta_blocks)
 
 
-def resumen(stints: list[Stint]) -> str:
-    """Un parrafo describiendo el conjunto, para imprimir antes de entrenar."""
+def describe(stints: list[Stint]) -> str:
+    """A paragraph describing the set, to print before training."""
     if not stints:
-        return "Conjunto vacio"
+        return "Empty dataset"
 
-    longitudes = np.array([s.n_vueltas for s in stints])
+    lengths = np.array([s.n_laps for s in stints])
     deltas = np.concatenate([s.delta for s in stints])
 
-    cuenta: dict[str, int] = {}
+    counts: dict[str, int] = {}
     for s in stints:
-        cuenta[s.compuesto] = cuenta.get(s.compuesto, 0) + 1
-    por_compuesto = ", ".join(f"{k}:{v}" for k, v in sorted(cuenta.items()))
+        counts[s.compound] = counts.get(s.compound, 0) + 1
+    by_compound = ", ".join(f"{k}:{v}" for k, v in sorted(counts.items()))
 
     return (
-        f"{len(stints)} stints | {int(longitudes.sum())} vueltas\n"
-        f"  Longitud del stint:  min={longitudes.min()} "
-        f"mediana={np.median(longitudes):.0f} max={longitudes.max()}\n"
-        f"  Perdida de ritmo:    min={deltas.min():.2f}s "
-        f"mediana={np.median(deltas):.2f}s max={deltas.max():.2f}s\n"
-        f"  Compuestos: {por_compuesto}"
+        f"{len(stints)} stints | {int(lengths.sum())} laps\n"
+        f"  Stint length:  min={lengths.min()} "
+        f"median={np.median(lengths):.0f} max={lengths.max()}\n"
+        f"  Pace loss:     min={deltas.min():.2f}s "
+        f"median={np.median(deltas):.2f}s max={deltas.max():.2f}s\n"
+        f"  Compounds: {by_compound}"
     )

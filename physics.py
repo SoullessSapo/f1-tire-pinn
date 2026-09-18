@@ -1,121 +1,116 @@
 """
-MODELO FISICO DEL DESGASTE DE UN NEUMATICO
-==========================================
+PHYSICAL MODEL OF TIRE WEAR
+===========================
 
-COMO LEER ESTE FICHERO
-----------------------
-Todo lo que hay aqui gira alrededor de UNA ecuacion diferencial.
+HOW TO READ THIS FILE
+---------------------
+Everything here revolves around ONE differential equation.
 
-Una ecuacion diferencial no dice cuanto vale algo. Dice a que VELOCIDAD cambia.
-Es la diferencia entre "el deposito tiene 40 litros" y "el deposito pierde 2
-litros por minuto". Con la segunda frase, mas el nivel de partida, puedes
-reconstruir el nivel en cualquier instante futuro: eso es integrar.
+A differential equation does not say how much something is worth. It says how
+fast it CHANGES. It is the difference between "the tank holds 40 litres" and
+"the tank loses 2 litres per minute". With the second sentence, plus a starting
+level, you can reconstruct the level at any future instant: that is integrating.
 
-Aqui lo que cambia es el desgaste del neumatico, y la ecuacion dice a que
-velocidad se gasta segun las condiciones en las que esta rodando.
-
-
-LAS VARIABLES, UNA POR UNA
---------------------------
-Hay tres grupos y conviene no mezclarlos nunca:
-
-1) EL TIEMPO
-   tau .............. tiempo adimensional = vuelta_del_stint / 30
-                      Un stint normal de 30 vueltas va de tau=0 a tau=1.
-                      Se divide por 30 para que los numeros que entran a la red
-                      esten cerca de 1. Una red entrenada con entradas de
-                      escalas muy distintas converge mal.
-
-2) EL ESTADO (lo que evoluciona)
-   d ................ fraccion de banda de rodadura consumida.
-                      0 = neumatico nuevo, 1 = neumatico agotado.
-                      *** ES LATENTE: no se mide NUNCA, ni en el banco ni en
-                      carrera. El modelo lo reconstruye. ***
-
-3) EL CONTEXTO (5 variables, constantes dentro de un stint)
-   q_friccion ....... energia de friccion por vuelta, normalizada (~1)
-                      Cuanta energia mete el piso contra la goma.
-   carga ............ carga mecanica media en g, normalizada (~1)
-                      Cuanto peso aparente soporta el neumatico en curva.
-   velocidad ........ velocidad media, normalizada (~1)
-                      Mas velocidad = mas aire = mas refrigeracion.
-   temp_pista ....... temperatura de pista, normalizada de 0 a 1
-   compuesto ........ dureza: 0 = blando, 0.5 = medio, 1 = duro
-
-Y una cosa mas, la unica que de verdad se mide:
-
-   delta ............ perdida de ritmo en segundos respecto a la mejor vuelta
-                      del stint. *** ES EL UNICO OBSERVABLE. ***
+Here what changes is tire wear, and the equation says how fast the tire is
+being consumed given the conditions it is running in.
 
 
-LA ECUACION
------------
-    dd/dtau = k(contexto) * (1 - d)
+THE VARIABLES, ONE BY ONE
+-------------------------
+There are three groups and they should never be mixed up:
 
-    con   k(contexto) = kw * (carga/carga_ref)^m
-                           * exp( Ea*(temp_pista - temp_ref)
-                                + Eq*(q_friccion - q_ref)
-                                - Ev*(velocidad  - vel_ref)
-                                - kappa*(compuesto - comp_ref) )
+1) TIME
+   tau .............. dimensionless time = stint_lap / 30
+                      A normal 30-lap stint runs from tau=0 to tau=1.
+                      Dividing by 30 keeps the numbers entering the network
+                      close to 1. A network trained on inputs of wildly
+                      different scales converges badly.
 
-Leida en castellano: "el neumatico se gasta a una velocidad que depende de las
-condiciones, y que se frena a medida que queda menos goma".
+2) THE STATE (what evolves)
+   d ................ fraction of the tread that has been consumed.
+                      0 = brand-new tire, 1 = tire gone.
+                      *** IT IS LATENT: it is NEVER measured, not on the test
+                      bench and not in a race. The model reconstructs it. ***
 
-Cada pieza del exponente es una afirmacion fisica, y cada signo esta elegido:
+3) THE CONTEXT (5 variables, constant within a stint)
+   q_fric ........... frictional energy per lap, normalised (~1)
+                      How much energy the track puts into the rubber.
+   load ............. mean mechanical load in g, normalised (~1)
+                      How much apparent weight the tire carries in a corner.
+   speed ............ mean speed, normalised (~1)
+                      More speed = more airflow = more cooling.
+   track_temp ....... track temperature, normalised from 0 to 1
+   compound ......... hardness: 0 = soft, 0.5 = medium, 1 = hard
 
-    + Ea*temp_pista .... mas calor, mas desgaste (activacion termica)
-    + Eq*q_friccion .... mas energia de friccion, mas desgaste
-    - Ev*velocidad ..... mas velocidad, mas refrigeracion, MENOS desgaste
-    - kappa*compuesto .. mas duro, MENOS desgaste
-    carga^m ............ ley de Archard: el desgaste crece con la carga
+And one more thing, the only one that is actually measured:
 
-
-POR QUE SE RESTA UNA REFERENCIA EN CADA TERMINO
------------------------------------------------
-Fijate en que cada variable aparece como (variable - su_referencia). Eso hace
-que en condiciones de referencia el exponente valga CERO y por tanto k = kw.
-Es decir: kw pasa a significar literalmente "la velocidad de desgaste en
-condiciones normales", que es una frase que se puede discutir con un ingeniero.
-
-Pero no es solo cosmetica. Sin restar la referencia, kw y los demas
-coeficientes se pisan: subir kw y bajar Ev a la vez deja el desgaste medio
-igual, asi que hay infinitas combinaciones casi equivalentes y el optimizador
-no sabe cual elegir. Se midio en este mismo proyecto: sin centrar, kw salia con
-un 10 % de error y Ev con un 33 %, PERO la combinacion log(kw) - Ev se recuperaba
-con un error de 0.0098. O sea, el modelo sabia perfectamente cuanto se gasta el
-neumatico; lo que no sabia era a cual de las dos constantes atribuirlo.
-
-Centrar los regresores es el remedio clasico de ese problema en regresion, y
-aqui hace exactamente lo mismo.
-
-El factor (1 - d) es una saturacion. Acota d entre 0 y 1 por construccion,
-porque no puedes consumir mas goma de la que hay, y mantiene la velocidad de
-desgaste positiva. Es decir: el neumatico solo puede ir a peor, y eso sale de la
-ECUACION, no de una restriccion pegada por fuera.
+   delta ............ pace loss in seconds relative to the stint's best lap.
+                      *** THIS IS THE ONLY OBSERVABLE. ***
 
 
-LO QUE ESTE MODELO NO TIENE
----------------------------
-No tiene temperatura del neumatico como estado propio. La temperatura entra de
-forma aproximada, a traves de temp_pista, q_friccion y velocidad, pero no
-evoluciona por si sola.
+THE EQUATION
+------------
+    dd/dtau = k(context) * (1 - d)
 
-Eso tiene una consecuencia importante: no hay realimentacion entre el desgaste
-y el calor, y por tanto NO HAY CLIFF. La curva de ritmo solo puede doblarse
-hacia un lado. Meter esa realimentacion es el salto a la rama `main`, donde hay
-una segunda ecuacion diferencial para la temperatura. Ver ROADMAP.md.
+    with  k(context) = kw * (load/load_ref)^m
+                          * exp( Ea*(track_temp - temp_ref)
+                               + Eq*(q_fric     - q_ref)
+                               - Ev*(speed      - speed_ref)
+                               - kappa*(compound - compound_ref) )
+
+Read in plain words: "the tire wears at a rate that depends on the conditions,
+and that slows down as there is less rubber left".
+
+Every piece of the exponent is a physical claim, and every sign is chosen:
+
+    + Ea*track_temp .... hotter track, more wear (thermal activation)
+    + Eq*q_fric ........ more frictional energy, more wear
+    - Ev*speed ......... more speed, more cooling, LESS wear
+    - kappa*compound ... harder compound, LESS wear
+    load^m ............. Archard's law: wear grows with load
 
 
-LA PROPIEDAD QUE HACE UTIL ESTE MODELO
---------------------------------------
-Como el contexto es constante dentro de un stint, k(contexto) es una CONSTANTE,
-y entonces la ecuacion tiene SOLUCION EXACTA escrita a mano:
+WHY EACH TERM SUBTRACTS A REFERENCE
+-----------------------------------
+Notice that every variable enters as (variable - its_reference). That makes the
+exponent vanish at reference conditions, so there k = kw. In other words, kw
+comes to mean literally "the wear rate under normal conditions", which is a
+sentence you can argue about with an engineer.
+
+But it is not cosmetic. Without subtracting the reference, kw and the other
+coefficients step on each other: raising kw and lowering Ev at the same time
+leaves mean wear unchanged, so there are infinitely many near-equivalent
+combinations and the optimiser cannot tell which to pick. It was measured in
+this very project: uncentred, kw came out with 10 % error and Ev with 33 %, BUT
+the combination log(kw) - Ev was recovered to within 0.0098. That is, the model
+knew perfectly well how fast the tire was wearing; what it did not know was
+which of the two constants to attribute it to.
+
+Centring the regressors is the classic remedy for that problem in regression,
+and it does exactly the same job here.
+
+
+WHAT THIS MODEL DOES NOT HAVE
+-----------------------------
+It has no tire temperature as a state of its own. Temperature enters only
+approximately, through track_temp, q_fric and speed, but it does not evolve.
+
+That has an important consequence: there is no feedback between wear and heat,
+and therefore THERE IS NO CLIFF. The pace curve can only bend one way. Adding
+that feedback is the jump to the `main` branch, where a second differential
+equation carries the temperature. See ROADMAP.md.
+
+
+THE PROPERTY THAT MAKES THIS MODEL USEFUL
+-----------------------------------------
+Because the context is constant within a stint, k(context) is a CONSTANT, and
+then the equation has an EXACT hand-written solution:
 
     d(tau) = 1 - exp(-k * tau)
 
-Eso es justo lo que se necesita para empezar: se puede comprobar que la red
-acierta comparandola con la respuesta exacta, antes de apuntar el metodo a un
-sistema donde no existe ninguna respuesta exacta contra la que comparar.
+That is precisely what is needed to start: you can check that the network is
+right by comparing it against the exact answer, before pointing the method at a
+system where no exact answer exists to compare against.
 """
 
 from __future__ import annotations
@@ -125,270 +120,271 @@ from dataclasses import dataclass, fields
 import numpy as np
 
 try:
-    # torch solo hace falta cuando el PINN evalua el residuo durante el
-    # entrenamiento. Para generar datos o integrar, numpy basta.
+    # torch is only needed when the PINN evaluates the residual during
+    # training. Generating data or integrating only needs numpy.
     import torch
 except ImportError:  # pragma: no cover
     torch = None
 
 
 # ---------------------------------------------------------------------------
-# 1) CONSTANTES DE ESCALA
+# 1) SCALE CONSTANTS
 # ---------------------------------------------------------------------------
 
-# Cuantas vueltas son una unidad de tau. Un stint de 30 vueltas -> tau de 0 a 1.
-VUELTAS_REF = 30.0
+# How many laps make up one unit of tau. A 30-lap stint -> tau from 0 to 1.
+LAP_REF = 30.0
 
-# Hasta donde miramos al extrapolar: el horizonte de una decision de estrategia.
-HORIZONTE_VUELTAS = 45
+# How far ahead we look when extrapolating: a strategy decision horizon.
+STRATEGY_HORIZON = 45
 
-# Traduccion del nombre del compuesto a un numero entre 0 (blando) y 1 (duro).
-INDICE_COMPUESTO = {
+# Translation from compound name to a number between 0 (soft) and 1 (hard).
+COMPOUND_INDEX = {
     "SOFT": 0.0,
     "MEDIUM": 0.5,
     "HARD": 1.0,
-    # Los que pueden aparecer en datos reales y no son secos:
+    # The ones that can show up in real data and are not slicks:
     "INTERMEDIATE": 0.75,
     "WET": 1.0,
 }
 
 
 # ---------------------------------------------------------------------------
-# 2) EL CONTEXTO DE UN STINT
+# 2) THE CONTEXT OF A STINT
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class Contexto:
-    """Las 5 condiciones en las que rueda un stint.
+class Context:
+    """The 5 conditions a stint runs in.
 
-    Son constantes dentro del stint: un juego de neumaticos corre siempre el
-    mismo circuito, con la misma temperatura aproximada y el mismo compuesto.
+    They are constant within the stint: one set of tires always runs the same
+    circuit, at roughly the same temperature, on the same compound.
 
-    Se usa una clase con nombres en vez de una lista de 5 numeros porque
-    `contexto.temp_pista` se entiende al leerlo y `contexto[3]` no.
+    A class with names is used rather than a list of 5 numbers because
+    `context.track_temp` can be understood while reading and `context[3]`
+    cannot.
     """
 
-    q_friccion: float = 1.0
-    carga: float = 1.0
-    velocidad: float = 1.0
-    temp_pista: float = 0.5
-    compuesto: float = 0.0
+    q_fric: float = 1.0
+    load: float = 1.0
+    speed: float = 1.0
+    track_temp: float = 0.5
+    compound: float = 0.0
 
     def vector(self) -> np.ndarray:
-        """Los 5 numeros en el orden canonico, para dárselos a la red."""
+        """The 5 numbers in canonical order, ready to feed the network."""
         return np.array([getattr(self, f.name) for f in fields(self)], dtype=float)
 
     @classmethod
-    def desde_vector(cls, v) -> Contexto:
-        """Operacion inversa de `vector()`."""
+    def from_vector(cls, v) -> Context:
+        """Inverse of `vector()`."""
         return cls(*(float(x) for x in np.asarray(v, dtype=float).ravel()))
 
     @property
-    def nombre_compuesto(self) -> str:
-        """El compuesto mas cercano, para etiquetar graficas."""
-        return min(INDICE_COMPUESTO, key=lambda k: abs(INDICE_COMPUESTO[k] - self.compuesto))
+    def compound_name(self) -> str:
+        """The nearest compound, for labelling plots."""
+        return min(COMPOUND_INDEX, key=lambda k: abs(COMPOUND_INDEX[k] - self.compound))
 
 
-# Nombres en el orden canonico. TODO el proyecto asume este orden: la red, el
-# baseline, el generador y el lector de CSV. Es el contrato del proyecto.
-CONTEXTO_NOMBRES = tuple(f.name for f in fields(Contexto))
-N_CONTEXTO = len(CONTEXTO_NOMBRES)          # 5
-N_ENTRADAS_RED = 1 + N_CONTEXTO             # 6 = tau + contexto
+# Names in canonical order. THE WHOLE project assumes this order: the network,
+# the baseline, the generator and the CSV reader. It is the project's contract.
+CONTEXT_NAMES = tuple(f.name for f in fields(Context))
+N_CONTEXT = len(CONTEXT_NAMES)          # 5
+N_INPUTS = 1 + N_CONTEXT                # 6 = tau + context
 
-# Rango fisicamente razonable de cada variable de contexto.
-# Sirve para dos cosas: generar stints sinteticos, y decidir DONDE se le exige
-# a la red que cumpla la ecuacion (ver pinn.py, puntos de colocacion).
-RANGOS_CONTEXTO = {
-    "q_friccion": (0.40, 1.60),
-    "carga": (0.50, 1.50),
-    "velocidad": (0.60, 1.40),
-    "temp_pista": (0.00, 1.00),
-    "compuesto": (0.00, 1.00),
+# Physically sensible range of each context variable.
+# It is used for two things: generating synthetic stints, and deciding WHERE
+# the network is required to satisfy the equation (see pinn.py, collocation).
+CONTEXT_RANGES = {
+    "q_fric": (0.40, 1.60),
+    "load": (0.50, 1.50),
+    "speed": (0.60, 1.40),
+    "track_temp": (0.00, 1.00),
+    "compound": (0.00, 1.00),
 }
 
-# Condiciones de referencia: el centro de cada rango. En este punto el
-# exponente de la ecuacion vale cero, asi que kw es exactamente "la velocidad
-# de desgaste en condiciones normales". Ver la explicacion de arriba sobre por
-# que centrar importa.
-REFERENCIA = Contexto(
-    q_friccion=1.0,
-    carga=1.0,
-    velocidad=1.0,
-    temp_pista=0.5,
-    compuesto=0.5,
+# Reference conditions: the centre of each range. At this point the exponent of
+# the equation is zero, so kw is exactly "the wear rate under normal
+# conditions". See the explanation above on why centring matters.
+REFERENCE = Context(
+    q_fric=1.0,
+    load=1.0,
+    speed=1.0,
+    track_temp=0.5,
+    compound=0.5,
 )
 
 
 # ---------------------------------------------------------------------------
-# 3) LAS CONSTANTES FISICAS DEL MODELO
+# 3) THE PHYSICAL CONSTANTS OF THE MODEL
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class ParametrosFisicos:
-    """Las 7 constantes de la ecuacion.
+class TireParams:
+    """The 7 constants of the equation.
 
-    Seis de ellas las ESTIMA el PINN mientras entrena (problema inverso). La
-    septima, gamma1, se mantiene fija, y hay un motivo importante para ello que
-    se explica justo debajo de la clase.
+    Six of them are ESTIMATED by the PINN while it trains (the inverse
+    problem). The seventh, gamma1, stays fixed, and there is an important
+    reason for that spelled out just below the class.
     """
 
-    kw: float = 0.55        # velocidad base de desgaste
-    m: float = 1.50         # exponente de carga (ley de Archard)
-    Ea: float = 0.95        # cuanto acelera el desgaste la temperatura de pista
-    Eq: float = 0.40        # cuanto lo acelera la energia de friccion
-    Ev: float = 0.35        # cuanto lo frena la refrigeracion por velocidad
-    kappa: float = 0.85     # cuanto resiste al desgaste un compuesto mas duro
-    gamma1: float = 1.35    # segundos perdidos por unidad de desgaste [s]
+    kw: float = 0.55        # base wear rate
+    m: float = 1.50         # load exponent (Archard's law)
+    Ea: float = 0.95        # how much track temperature accelerates wear
+    Eq: float = 0.40        # how much frictional energy accelerates it
+    Ev: float = 0.35        # how much cooling by speed slows it down
+    kappa: float = 0.85     # how much a harder compound resists wear
+    gamma1: float = 1.35    # seconds lost per unit of wear [s]
 
 
-# Los valores "verdaderos" que usa el generador sintetico. El PINN arranca de
-# valores deliberadamente equivocados y tiene que RECUPERAR estos a partir de
-# tiempos por vuelta con ruido. Que lo consiga es la prueba de que el metodo
-# funciona, y es la unica comprobacion que con datos reales es imposible hacer,
-# porque alli no existe ninguna verdad de referencia.
-VALORES_REALES = ParametrosFisicos()
+# The "true" values the synthetic generator uses. The PINN starts from
+# deliberately wrong values and has to RECOVER these from noisy lap times.
+# Succeeding is the proof that the method works, and it is the one check that
+# is impossible with real data, because no ground truth exists there.
+GROUND_TRUTH = TireParams()
 
-# Las seis que el PINN estima. gamma1 NO esta en la lista, a proposito.
+# The six the PINN estimates. gamma1 is NOT in the list, on purpose.
 #
-# Por que gamma1 se queda fija
-# ----------------------------
-# Lo unico que se mide es delta = gamma1 * d. Si se dejan libres a la vez d y
-# gamma1, hay infinitas combinaciones que dan exactamente el mismo delta:
-# multiplicar d por 2 y dividir gamma1 por 2 no cambia nada de lo observable.
-# El optimizador no tiene forma de preferir una y se desliza por esa direccion
-# hasta desbordar. Fijar gamma1 ancla la escala de d y cierra el problema.
+# Why gamma1 stays fixed
+# ----------------------
+# The only thing measured is delta = gamma1 * d. If d and gamma1 are both left
+# free, infinitely many combinations produce exactly the same delta: doubling d
+# and halving gamma1 changes nothing observable. The optimiser has no way to
+# prefer one, and slides along that direction until it overflows. Fixing gamma1
+# anchors the scale of d and closes the problem.
 #
-# En la rama `main` esto mismo aparece a lo grande y fue el error mas grave del
-# proyecto: el entrenamiento divergio hasta un RMSE de miles de millones de
-# segundos mientras la perdida de entrenamiento se veia baja.
-PARAMETROS_LIBRES = ("kw", "m", "Ea", "Eq", "Ev", "kappa")
+# In the `main` branch this same issue appears at full size and was the worst
+# bug of the project: training diverged to an RMSE of billions of seconds while
+# the training loss looked low.
+LEARNABLE_PARAMS = ("kw", "m", "Ea", "Eq", "Ev", "kappa")
 
 
 # ---------------------------------------------------------------------------
-# 4) LA ECUACION
+# 4) THE EQUATION
 # ---------------------------------------------------------------------------
 
-def _es_tensor(x) -> bool:
-    """True si x es un tensor de torch (y no un array de numpy)."""
+def _is_tensor(x) -> bool:
+    """True if x is a torch tensor (rather than a numpy array)."""
     return torch is not None and torch.is_tensor(x)
 
 
-def constante_desgaste(q_friccion, carga, velocidad, temp_pista, compuesto, p):
-    """k(contexto): todo lo de la ecuacion que NO depende de d.
+def wear_constant(q_fric, load, speed, track_temp, compound, p):
+    """k(context): everything in the equation that does NOT depend on d.
 
-    Se separa en su propia funcion porque aparece en dos sitios que tienen que
-    coincidir exactamente: la velocidad de desgaste y la solucion exacta.
+    It is split into its own function because it appears in two places that
+    have to agree exactly: the wear rate and the exact solution.
 
-    Funciona igual con numeros de numpy y con tensores de torch. Esa dualidad
-    es deliberada: asi la MISMA funcion define la verdad de referencia (cuando
-    se generan datos) y el residuo que la red minimiza (cuando se entrena). Si
-    hubiera dos copias, tarde o temprano una se corregiria y la otra no.
+    It works identically with numpy numbers and with torch tensors. That
+    duality is deliberate: it lets the SAME function define the ground truth
+    (when generating data) and the residual the network minimises (when
+    training). With two copies, sooner or later one gets fixed and the other
+    does not.
     """
-    if _es_tensor(q_friccion):
-        exp, potencia = torch.exp, torch.pow
-        carga_relativa = torch.clamp(carga / REFERENCIA.carga, min=1e-6)
+    if _is_tensor(q_fric):
+        exp, power = torch.exp, torch.pow
+        relative_load = torch.clamp(load / REFERENCE.load, min=1e-6)
     else:
-        exp, potencia = np.exp, np.power
-        carga_relativa = np.maximum(carga / REFERENCIA.carga, 1e-6)
+        exp, power = np.exp, np.power
+        relative_load = np.maximum(load / REFERENCE.load, 1e-6)
 
-    # La carga nunca es negativa fisicamente, pero durante el entrenamiento la
-    # red puede recibir puntos raros y `potencia` con base negativa da NaN.
+    # Load is never negative physically, but during training the network can
+    # be handed odd points, and `power` with a negative base gives NaN.
 
-    # Cada variable entra como "cuanto se desvia de lo normal". Asi kw queda
-    # con significado propio y no se pisa con los demas coeficientes.
-    exponente = (
-        p.Ea * (temp_pista - REFERENCIA.temp_pista)
-        + p.Eq * (q_friccion - REFERENCIA.q_friccion)
-        - p.Ev * (velocidad - REFERENCIA.velocidad)
-        - p.kappa * (compuesto - REFERENCIA.compuesto)
+    # Each variable enters as "how far it deviates from normal". That way kw
+    # keeps a meaning of its own and does not step on the other coefficients.
+    exponent = (
+        p.Ea * (track_temp - REFERENCE.track_temp)
+        + p.Eq * (q_fric - REFERENCE.q_fric)
+        - p.Ev * (speed - REFERENCE.speed)
+        - p.kappa * (compound - REFERENCE.compound)
     )
-    return p.kw * potencia(carga_relativa, p.m) * exp(exponente)
+    return p.kw * power(relative_load, p.m) * exp(exponent)
 
 
-def velocidad_desgaste(d, q_friccion, carga, velocidad, temp_pista, compuesto, p):
-    """El lado derecho de la ecuacion: dd/dtau.
+def wear_rate(d, q_fric, load, speed, track_temp, compound, p):
+    """The right-hand side of the equation: dd/dtau.
 
-    Es no negativa mientras d <= 1, asi que el desgaste monotono (el neumatico
-    solo va a peor) y la cota d <= 1 salen las dos de la propia ecuacion.
+    It is non-negative while d <= 1, so monotonic wear (the tire can only get
+    worse) and the bound d <= 1 both fall out of the equation itself.
     """
-    k = constante_desgaste(q_friccion, carga, velocidad, temp_pista, compuesto, p)
+    k = wear_constant(q_fric, load, speed, track_temp, compound, p)
     return k * (1.0 - d)
 
 
-def perdida_ritmo(d, p: ParametrosFisicos):
-    """Convierte el estado latente d en lo unico observable: segundos.
+def pace_loss(d, p: TireParams):
+    """Turns the latent state d into the only observable: seconds.
 
-    Esto es el "operador de observacion". La red predice d, que nadie ha medido
-    nunca; esta funcion lo traduce a algo que si se puede comparar con los
-    datos. Por eso d puede reconstruirse sin haber aparecido jamas en la
-    funcion de coste.
+    This is the "observation operator". The network predicts d, which nobody
+    has ever measured; this function translates it into something that can be
+    compared against the data. That is how d can be reconstructed without ever
+    appearing in the loss function.
     """
     return p.gamma1 * d
 
 
 # ---------------------------------------------------------------------------
-# 5) RESOLVER LA ECUACION (dos formas)
+# 5) SOLVING THE EQUATION (two ways)
 # ---------------------------------------------------------------------------
 
-def solucion_exacta(tau, contexto: Contexto, p: ParametrosFisicos) -> np.ndarray:
-    """La solucion escrita a mano, sin aproximar nada.
+def exact_solution(tau, context: Context, p: TireParams) -> np.ndarray:
+    """The hand-written solution, with nothing approximated.
 
-    Como el contexto es constante dentro del stint, k tambien lo es, y separar
-    variables en dd/dtau = k*(1-d) con d(0)=0 da directamente:
+    Because the context is constant within the stint, k is constant too, and
+    separating variables in dd/dtau = k*(1-d) with d(0)=0 gives directly:
 
         d(tau) = 1 - exp(-k * tau)
 
-    Esta es la referencia contra la que se comprueba todo lo demas. Tener una
-    respuesta exacta es la razon de que este modelo sea el punto de partida
-    correcto: se valida el metodo donde se PUEDE validar.
+    This is the reference everything else is checked against. Having an exact
+    answer is the reason this model is the right starting point: the method is
+    validated where it CAN be validated.
     """
-    k = constante_desgaste(
-        contexto.q_friccion, contexto.carga, contexto.velocidad,
-        contexto.temp_pista, contexto.compuesto, p,
+    k = wear_constant(
+        context.q_fric, context.load, context.speed,
+        context.track_temp, context.compound, p,
     )
     return 1.0 - np.exp(-k * np.asarray(tau, dtype=float))
 
 
-def integrar_stint(
-    n_vueltas: int,
-    contexto: Contexto,
-    p: ParametrosFisicos,
-    pasos_por_vuelta: int = 8,
+def integrate_stint(
+    n_laps: int,
+    context: Context,
+    p: TireParams,
+    steps_per_lap: int = 8,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Resolver la ecuacion paso a paso, con Runge-Kutta de orden 4.
+    """Solve the equation step by step, with 4th-order Runge-Kutta.
 
-    Aqui esto es redundante: arriba esta la solucion exacta. Y ese es justo el
-    motivo de tenerlo. Se puede comprobar que el integrador coincide con la
-    respuesta exacta AHORA, que es barato comprobarlo. En `main` hay dos
-    ecuaciones acopladas, la solucion exacta desaparece, y lo unico que queda
-    es este integrador: mas vale que este validado.
+    Here this is redundant: the exact solution is right above. And that is
+    exactly why it is here. The integrator can be checked against the exact
+    answer NOW, while checking is cheap. In `main` there are two coupled
+    equations, the exact solution disappears, and this integrator is all that
+    is left: it had better be validated.
 
-    Runge-Kutta 4 en vez de Euler porque Euler acumula un sesgo sistematico, y
-    el problema inverso interpretaria ese sesgo como si fuera fisica.
+    Runge-Kutta 4 rather than Euler because Euler accumulates a systematic
+    bias, and the inverse problem would read that bias as if it were physics.
 
-    Devuelve (vueltas, d) con las vueltas numeradas 1..n_vueltas.
+    Returns (laps, d) with laps numbered 1..n_laps.
     """
-    dt = 1.0 / (VUELTAS_REF * pasos_por_vuelta)
+    dt = 1.0 / (LAP_REF * steps_per_lap)
 
-    def ritmo(d_actual: float) -> float:
-        return velocidad_desgaste(
-            d_actual, contexto.q_friccion, contexto.carga, contexto.velocidad,
-            contexto.temp_pista, contexto.compuesto, p,
+    def rate(current_d: float) -> float:
+        """The slope at a given wear level, with this stint's context."""
+        return wear_rate(
+            current_d, context.q_fric, context.load, context.speed,
+            context.track_temp, context.compound, p,
         )
 
-    d = 0.0            # neumatico nuevo
-    historial = []
+    d = 0.0            # brand-new tire
+    history = []
 
-    for _ in range(n_vueltas):
-        for _ in range(pasos_por_vuelta):
-            # Runge-Kutta 4: en vez de fiarse de la pendiente en un solo punto,
-            # promedia cuatro pendientes tomadas a lo largo del paso.
-            k1 = ritmo(d)
-            k2 = ritmo(d + 0.5 * dt * k1)
-            k3 = ritmo(d + 0.5 * dt * k2)
-            k4 = ritmo(d + dt * k3)
+    for _ in range(n_laps):
+        for _ in range(steps_per_lap):
+            # Runge-Kutta 4: instead of trusting the slope at a single point,
+            # it averages four slopes taken across the step.
+            k1 = rate(d)
+            k2 = rate(d + 0.5 * dt * k1)
+            k3 = rate(d + 0.5 * dt * k2)
+            k4 = rate(d + dt * k3)
             d = d + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        historial.append(d)
+        history.append(d)
 
-    vueltas = np.arange(1, n_vueltas + 1, dtype=float)
-    return vueltas, np.asarray(historial)
+    laps = np.arange(1, n_laps + 1, dtype=float)
+    return laps, np.asarray(history)

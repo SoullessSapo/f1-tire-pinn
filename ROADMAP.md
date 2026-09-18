@@ -139,8 +139,8 @@ los nueve parámetros se recuperan con **1,3 % de error medio**.
 
 ## Paso 6 · Datos reales  ◐ A MEDIAS EN ESTA RAMA
 
-> `descargar_datos.py` ya baja telemetría real, reconstruye los proxies y
-> escribe un CSV que `run.py --fuente csv` sabe entrenar. Lo que sigue siendo
+> `download_data.py` ya baja telemetría real, reconstruye los proxies y
+> escribe un CSV que `run.py --source csv` sabe entrenar. Lo que sigue siendo
 > más simple aquí es la corrección de vuelta de carrera: esta rama ajusta una
 > **pendiente lineal** por carrera, `main` ajusta un **spline lineal a trozos**
 > de 4 nudos, porque la forma de esa curva no tiene por qué ser una recta.

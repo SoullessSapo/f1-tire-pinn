@@ -14,7 +14,10 @@ real descargada de la API de Fórmula 1.
 > temporada completa de resultados. El camino de aquí hasta allí, paso a paso,
 > está en [ROADMAP.md](ROADMAP.md).
 
-![Ajuste y extrapolación](outputs/01_ajuste.png)
+> **El código está en inglés** (identificadores, comentarios y salida por consola), igual que en `main`, para que pasar de una rama a otra no obligue a traducir nada. Este README y el ROADMAP siguen en castellano.
+> La referencia función por función está en [DOCS.md](DOCS.md).
+
+![Ajuste y extrapolación](outputs/01_fit.png)
 
 *Los tres compuestos. La zona gris es lo que el modelo vio; a la derecha de la
 línea discontinua todos los modelos extrapolan. La curva roja del PINN queda
@@ -31,7 +34,7 @@ eso en un PINN es una sola observación:
 1. La diferenciación automática puede derivar la salida de la red **respecto a
    sus entradas**, de forma exacta y barata.
 2. Así que se puede calcular el **residuo** de la ecuación diferencial que la
-   física dice que se cumple: `r = dd/dτ − velocidad_desgaste(d, contexto)`.
+   física dice que se cumple: `r = dd/dτ − wear_rate(d, contexto)`.
 3. Evaluar ese residuo necesita **un punto del dominio y nada más**. No hace
    falta saber la respuesta correcta ahí.
 4. Metiendo `r²` en la pérdida, la red obedece la ecuación — incluso en vueltas
@@ -48,11 +51,11 @@ Una sola EDO, con cinco variables de contexto y un observable:
 ```
 (E)   dd/dτ = k(contexto) · (1 − d)
 
-      k = k_w · (carga/carga_ref)^m
-              · exp( E_a·(T_pista − T_ref)
-                   + E_q·(q_fricción − q_ref)
-                   − E_v·(velocidad − v_ref)
-                   − κ·(compuesto − c_ref) )
+      k = kw · (load/load_ref)^m
+             · exp( Ea·(track_temp − temp_ref)
+                  + Eq·(q_fric     − q_ref)
+                  − Ev·(speed      − speed_ref)
+                  − kappa·(compound − compound_ref) )
 
 obs   δ(τ) = γ₁ · d
 ```
@@ -64,13 +67,13 @@ obs   δ(τ) = γ₁ · d
 
 **El contexto** (constante dentro de un stint)
 
-| Variable | Qué es | Efecto |
+| Nombre en el código | Qué es | Efecto |
 |---|---|---|
-| `q_fricción` | energía de fricción por vuelta | más energía → más desgaste |
-| `carga` | carga mecánica media en g | ley de Archard: `carga^m` |
-| `velocidad` | velocidad media | más aire → más refrigeración → **menos** desgaste |
-| `T_pista` | temperatura del asfalto | activación térmica |
-| `compuesto` | 0 blando … 1 duro | más duro → **menos** desgaste |
+| `q_fric` | energía de fricción por vuelta | más energía → más desgaste |
+| `load` | carga mecánica media en g | ley de Archard: `load^m` |
+| `speed` | velocidad media | más aire → más refrigeración → **menos** desgaste |
+| `track_temp` | temperatura del asfalto | activación térmica |
+| `compound` | 0 blando … 1 duro | más duro → **menos** desgaste |
 
 **Lo único que se mide**
 
@@ -83,11 +86,11 @@ gastar más goma de la que hay. Y como mantiene la velocidad no negativa, la
 monotonía (el neumático nunca se regenera) sale de la propia ecuación, no de una
 restricción añadida después.
 
-**Restar una referencia en cada término** hace que `k_w` signifique
+**Restar una referencia en cada término** hace que `kw` signifique
 literalmente *la velocidad de desgaste en condiciones normales*. No es
-cosmética: sin centrar, `k_w` y `E_v` se pisan. Está medido en este mismo
-proyecto — sin centrar, `k_w` salía con un 10 % de error y `E_v` con un 33 %,
-pero la combinación `log(k_w) − E_v` se recuperaba con un error de **0,0098**.
+cosmética: sin centrar, `kw` y `Ev` se pisan. Está medido en este mismo
+proyecto — sin centrar, `kw` salía con un 10 % de error y `Ev` con un 33 %,
+pero la combinación `log(kw) − Ev` se recuperaba con un error de **0,0098**.
 El modelo sabía perfectamente cuánto se gastaba el neumático; lo que no sabía
 era a cuál de las dos constantes atribuirlo.
 
@@ -107,14 +110,15 @@ error de `1,3 × 10⁻¹¹`.
 |---|---|
 | `physics.py` | La EDO, el observable, la solución exacta y un integrador RK4 |
 | `data.py` | De dónde salen los stints: generador sintético **o** lector del CSV |
-| `descargar_datos.py` | **Descarga telemetría real de la API y la deja en un CSV** |
+| `download_data.py` | **Descarga telemetría real de la API y la deja en un CSV** |
 | `pinn.py` | El PINN en PyTorch puro: red, residuo, colocación, entrenamiento |
 | `baseline.py` | El modelo lineal clásico contra el que se compara |
 | `evaluate.py` | RMSE, MAE, error máximo y violaciones de monotonía |
 | `run.py` | Entrena, evalúa y dibuja |
+| `DOCS.md` | **Referencia completa: cada función, qué hace y cómo funciona** |
 
 La red es un perceptrón de `6 → 64 → 64 → 64 → 64 → 1` con `tanh`:
-**12 993 pesos**. Se puede cambiar sin tocar código con `--neuronas` y `--capas`.
+**12 993 pesos**. Se puede cambiar sin tocar código con `--width` y `--layers`.
 
 La pérdida tiene tres términos:
 
@@ -126,13 +130,13 @@ La pérdida tiene tres términos:
 
 Y **seis constantes físicas** se estiman junto con los pesos de la red: un
 problema inverso completo. Las cinco que tienen que ser positivas se
-parametrizan como su logaritmo, para que lo sean por construcción. `κ` se deja
+parametrizan como su logaritmo, para que lo sean por construcción. `kappa` se deja
 con el signo libre, porque es la única del sistema cuyo signo no está fijado por
 la física.
 
-`γ₁` **no** se estima, y hay un motivo: lo único que se mide es `δ = γ₁·d`, así
-que dejar libres a la vez `d` y `γ₁` admite infinitas soluciones equivalentes.
-Fijar `γ₁` ancla la escala. En `main` esta misma degeneración, sin cerrar, hizo
+`gamma1` **no** se estima, y hay un motivo: lo único que se mide es `δ = γ₁·d`, así
+que dejar libres a la vez `d` y `gamma1` admite infinitas soluciones equivalentes.
+Fijar `gamma1` ancla la escala. En `main` esta misma degeneración, sin cerrar, hizo
 divergir un entrenamiento hasta un RMSE de miles de millones de segundos.
 
 ## 4. Cómo correrlo
@@ -146,7 +150,7 @@ pip install -r requirements.txt
 ```bash
 python run.py                     # 48 stints, 8 000 iteraciones, ~1 min en CPU
 python run.py --quick             # versión corta para comprobar que arranca
-python run.py --neuronas 96 --capas 5 --iteraciones 15000   # red más grande
+python run.py --width 96 --layers 5 --iterations 15000   # red más grande
 ```
 
 ### Con datos reales
@@ -155,25 +159,25 @@ Primero se descargan, y quedan en un CSV que puedes abrir en Excel:
 
 ```bash
 # Una carrera
-python descargar_datos.py --anio 2023 --carreras Monza --salida datos/monza.csv
+python download_data.py --year 2023 --races Monza --out data/monza.csv
 
 # Varias, que es lo recomendable: con una sola, las condiciones apenas varían
-python descargar_datos.py --anio 2023 \
-    --carreras Monza Hungary Spa Silverstone \
-    --salida datos/2023.csv
+python download_data.py --year 2023 \
+    --races Monza Hungary Spa Silverstone \
+    --out data/2023.csv
 
 # Prueba rápida sin telemetría: segundos en vez de minutos
-python descargar_datos.py --anio 2023 --carreras Monza --sin-telemetria \
-    --salida datos/prueba.csv
+python download_data.py --year 2023 --races Monza --no-telemetry \
+    --out data/quick.csv
 ```
 
 Y después se entrena con ellos:
 
 ```bash
-python run.py --fuente csv --csv datos/2023.csv
+python run.py --source csv --csv data/2023.csv
 ```
 
-`python descargar_datos.py --ayuda-variables` explica de dónde sale cada columna
+`python download_data.py --explain-columns` explica de dónde sale cada columna
 del CSV, y `--help` lista todas las opciones.
 
 > **La primera descarga tarda.** Parsear la telemetría de una carrera lleva
@@ -188,8 +192,8 @@ La temperatura interna del neumático, la carga vertical y el estado de la banda
 son datos propios de cada equipo. Lo público es la telemetría de a bordo y los
 tiempos por vuelta. Así que las variables se reconstruyen:
 
-- **`q_fricción`** integrando `|a|·v` a lo largo de la vuelta.
-- **`carga`** como aceleración total media, en g.
+- **`q_fric`** integrando `|a|·v` a lo largo de la vuelta.
+- **`load`** como aceleración total media, en g.
 - **La aceleración lateral no viene en la telemetría**: se reconstruye derivando
   dos veces la trayectoria GPS. Como eso amplifica el ruido, antes se suaviza con
   un filtro Savitzky-Golay cuya ventana se fija **en segundos y no en muestras**,
@@ -202,7 +206,7 @@ Y hay dos correcciones sin las cuales los datos no sirven:
   de la carrera por motivos que no son el neumático, y sin corregirlo eso tapa
   la degradación entera. Las dos causas no son separables entre sí, pero su
   suma sí se puede estimar: el script ajusta una pendiente por carrera
-  controlando por piloto y por degradación. `--efecto-vuelta` permite fijarla a
+  controlando por piloto y por degradación. `--race-lap-effect` permite fijarla a
   mano.
 - **El origen de la degradación es el pico, no la primera vuelta.** Un juego
   nuevo sale frío y se hace *más rápido* dos o tres vueltas antes de empezar a
@@ -235,25 +239,25 @@ Recuperación de las constantes físicas — **9,3 % de error medio**:
 
 | Constante | Estimado | Real | Error |
 |---|---|---|---|
-| `k_w` | 0,5578 | 0,5500 | 1,4 % |
+| `kw` | 0,5578 | 0,5500 | 1,4 % |
 | `m` | 1,5439 | 1,5000 | 2,9 % |
-| `E_a` | 0,8721 | 0,9500 | 8,2 % |
-| `E_q` | 0,4102 | 0,4000 | 2,5 % |
-| `E_v` | 0,2279 | 0,3500 | **34,9 %** |
-| `κ` | 0,8003 | 0,8500 | 5,8 % |
+| `Ea` | 0,8721 | 0,9500 | 8,2 % |
+| `Eq` | 0,4102 | 0,4000 | 2,5 % |
+| `Ev` | 0,2279 | 0,3500 | **34,9 %** |
+| `kappa` | 0,8003 | 0,8500 | 5,8 % |
 
-### Ese 34,9 % de `E_v` no es un fallo: es falta de información
+### Ese 34,9 % de `Ev` no es un fallo: es falta de información
 
-`E_v` es el coeficiente de refrigeración. Sobre el rango en el que varía la
+`Ev` es el coeficiente de refrigeración. Sobre el rango en el que varía la
 velocidad, `0,6`–`1,4`, mueve el exponente de la ecuación solo **0,28**. Para
-comparar, `κ` lo mueve `0,85` y `E_a` lo mueve `0,95`. Es decir: `E_v` es, con
+comparar, `kappa` lo mueve `0,85` y `Ea` lo mueve `0,95`. Es decir: `Ev` es, con
 diferencia, **el efecto más pequeño del modelo**, y por tanto el que peor se
 distingue del ruido de cronometraje.
 
 Se comprueba dándole más datos y menos ruido:
 
 ```
-python run.py --stints 140 --ruido 0.02 --iteraciones 10000
+python run.py --stints 140 --noise 0.02 --iterations 10000
 ```
 
 | Modelo | RMSE | MAE | ErrorMax | ViolDentro | ViolExtrap |
@@ -263,15 +267,15 @@ python run.py --stints 140 --ruido 0.02 --iteraciones 10000
 
 | Constante | Estimado | Real | Error |
 |---|---|---|---|
-| `k_w` | 0,5505 | 0,5500 | 0,1 % |
+| `kw` | 0,5505 | 0,5500 | 0,1 % |
 | `m` | 1,4935 | 1,5000 | 0,4 % |
-| `E_a` | 0,9554 | 0,9500 | 0,6 % |
-| `E_q` | 0,3863 | 0,4000 | 3,4 % |
-| `E_v` | 0,3463 | 0,3500 | **1,1 %** |
-| `κ` | 0,8446 | 0,8500 | 0,6 % |
+| `Ea` | 0,9554 | 0,9500 | 0,6 % |
+| `Eq` | 0,3863 | 0,4000 | 3,4 % |
+| `Ev` | 0,3463 | 0,3500 | **1,1 %** |
+| `kappa` | 0,8446 | 0,8500 | 0,6 % |
 | | | **media** | **1,0 %** |
 
-Las seis constantes caen al **1,0 % de error medio**, y `E_v` pasa del 34,9 % al
+Las seis constantes caen al **1,0 % de error medio**, y `Ev` pasa del 34,9 % al
 1,1 %. Con suficientes datos el problema inverso funciona; con pocos, lo primero
 que se pierde es el efecto más débil.
 

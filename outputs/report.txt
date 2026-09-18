@@ -1,18 +1,18 @@
-48 stints | 1019 vueltas
-  Longitud del stint:  min=12 mediana=22 max=30
-  Perdida de ritmo:    min=-0.06s mediana=0.22s max=1.09s
-  Compuestos: HARD:16, MEDIUM:16, SOFT:16
+48 stints | 1019 laps
+  Stint length:  min=12 median=22 max=30
+  Pace loss:     min=-0.06s median=0.22s max=1.09s
+  Compounds: HARD:16, MEDIUM:16, SOFT:16
 
-Modelo                 RMSE      MAE  ErrorMax  ViolDentro   ViolExtrap
------------------------------------------------------------------------
-PINN                  0.048    0.040     0.113        0.0%         0.0%
-Lineal clasico        0.052    0.042     0.166        0.0%         0.8%
+Model                  RMSE      MAE    MaxErr     ViolIn   ViolExtrap
+----------------------------------------------------------------------
+PINN                  0.048    0.040     0.113       0.0%         0.0%
+Linear (classic)      0.052    0.042     0.166       0.0%         0.8%
 
-ViolDentro / ViolExtrap = % de vueltas donde el modelo predice que el
-neumatico RECUPERA agarre. Es fisicamente imposible: el valor correcto es 0 %.
+ViolIn / ViolExtrap = % of laps where the model predicts the tire
+REGAINING grip. That is physically impossible: the correct value is 0 %.
 
-Problema inverso: recuperacion de las constantes fisicas
-Constante      Estimado       Real     Error
+Inverse problem: recovery of the physical constants
+Constant      Estimated       True     Error
 ---------------------------------------------
 kw               0.5578     0.5500      1.4%
 m                1.5439     1.5000      2.9%
@@ -20,4 +20,4 @@ Ea               0.8721     0.9500      8.2%
 Eq               0.4102     0.4000      2.5%
 Ev               0.2279     0.3500     34.9%
 kappa            0.8003     0.8500      5.8%
-                             media      9.3%
+                              mean      9.3%
