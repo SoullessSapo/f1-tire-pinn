@@ -1,27 +1,42 @@
 # PINN de degradación de neumáticos — v0
 
-**Implementación inicial.** Una red neuronal a la que se le impone una ecuación
-diferencial, aplicada a la degradación de un neumático de Fórmula 1. Es el
-cimiento del proyecto: el mínimo que demuestra que el método funciona, escrito
-para poder leerse entero de una sentada.
+**Implementación inicial.** Una red neuronal a la que se le imponen dos
+ecuaciones diferenciales acopladas, aplicada a la degradación de un neumático de
+Fórmula 1. Es el cimiento del proyecto: el mínimo que demuestra que el método
+funciona, escrito para poder leerse entero de una sentada.
 
-Sin frameworks de PINN — el residuo está escrito a mano con PyTorch — y con dos
-fuentes de datos: un banco sintético donde se conoce la respuesta, y telemetría
-real descargada de la API de Fórmula 1.
+Sin frameworks de PINN — los residuos están escritos a mano con PyTorch — y con
+dos fuentes de datos: un banco sintético donde se conoce la respuesta, y
+telemetría real descargada de la API de Fórmula 1.
 
-> La versión avanzada está en la rama `main`: dos EDO acopladas, el *cliff*
-> emergiendo de la realimentación térmica, nueve parámetros estimados y una
-> temporada completa de resultados. El camino de aquí hasta allí, paso a paso,
-> está en [ROADMAP.md](ROADMAP.md).
+> ### ⚠ Las ecuaciones están puestas; las constantes no están calibradas
+>
+> Esta rama trae el **sistema acoplado completo**: la EDO térmica, la del
+> desgaste, su realimentación y el observable con término de acantilado. Lo que
+> **no** trae son los valores correctos de las doce constantes físicas: los que
+> hay en `physics.py` son un punto de partida.
+>
+> Con ellos, `beta = 0,71` y **no hay acantilado** (el porqué está abajo).
+> Calibrarlos es el trabajo, y hay una herramienta y una guía para hacerlo:
+>
+> ```bash
+> python tune.py          # diagnostica las constantes sin entrenar nada
+> ```
+>
+> **→ [TUNING.md](TUNING.md) es el manual.**
 
-> **El código está en inglés** (identificadores, comentarios y salida por consola), igual que en `main`, para que pasar de una rama a otra no obligue a traducir nada. Este README y el ROADMAP siguen en castellano.
+> La versión avanzada está en la rama `main`: la misma física, una temporada
+> completa de resultados y nueve parámetros estimados. El camino de aquí hasta
+> allí, paso a paso, está en [ROADMAP.md](ROADMAP.md).
+
+> **El código está en inglés** (identificadores, comentarios y salida por consola), igual que en `main`, para que pasar de una rama a otra no obligue a traducir nada. Este README, el ROADMAP y la guía de ajuste siguen en castellano.
 > La referencia función por función está en [DOCS.md](DOCS.md).
 
 ![Ajuste y extrapolación](outputs/01_fit.png)
 
 *Los tres compuestos. La zona gris es lo que el modelo vio; a la derecha de la
 línea discontinua todos los modelos extrapolan. La curva roja del PINN queda
-encima de la solución exacta (azul).*
+encima de la curva verdadera (azul).*
 
 ---
 
@@ -33,12 +48,16 @@ eso en un PINN es una sola observación:
 
 1. La diferenciación automática puede derivar la salida de la red **respecto a
    sus entradas**, de forma exacta y barata.
-2. Así que se puede calcular el **residuo** de la ecuación diferencial que la
-   física dice que se cumple: `r = dd/dτ − wear_rate(d, contexto)`.
+2. Así que se puede calcular el **residuo** de cada ecuación diferencial que la
+   física dice que se cumple: `r_d = dd/dτ − wear_rate(d, θ, contexto)` y
+   `r_θ = dθ/dτ − thermal_rate(θ, d, contexto)`.
 3. Evaluar ese residuo necesita **un punto del dominio y nada más**. No hace
    falta saber la respuesta correcta ahí.
-4. Metiendo `r²` en la pérdida, la red obedece la ecuación — incluso en vueltas
-   donde no hay ni un solo dato.
+4. Metiendo `r²` en la pérdida, la red obedece las ecuaciones — incluso en
+   vueltas donde no hay ni un solo dato.
+
+Aquí eso importa el doble, porque **`θ` no se mide en ninguna parte**: lo único
+que sujeta la curva de temperatura es la ecuación.
 
 El paso 3 es todo el truco. El término de física se exige en 2 000 puntos
 repartidos hasta la vuelta 45, mucho más allá del stint más largo del conjunto,
@@ -46,30 +65,33 @@ y en combinaciones de condiciones que no se dieron en ninguna carrera.
 
 ## 2. El modelo físico
 
-Una sola EDO, con cinco variables de contexto y un observable:
+Dos EDO acopladas, cinco variables de contexto y un observable:
 
 ```
-(E)   dd/dτ = k(contexto) · (1 − d)
+(E1)  dθ/dτ = A_gen·q_fric·(1 + ζ·d) − (h₀ + h₁·speed)·θ      la térmica
+
+(E2)  dd/dτ = k(contexto, θ) · (1 − d)                         el desgaste
 
       k = kw · (load/load_ref)^m
-             · exp( Ea·(track_temp − temp_ref)
+             · exp( Ea·(track_temp − temp_ref + θ)
                   + Eq·(q_fric     − q_ref)
                   − Ev·(speed      − speed_ref)
                   − kappa·(compound − compound_ref) )
 
-obs   δ(τ) = γ₁ · d
+(E3)  δ(τ) = γ₁·d + γ₂·d⁸                                      el observable
 ```
 
-**El tiempo y el estado**
+**El tiempo y los dos estados**
 
 - `τ` — tiempo adimensional del stint, `vuelta / 30`
-- `d` — fracción de goma consumida, `0` nueva … `1` gastada · **estado latente, nunca se observa**
+- `θ` — temperatura de la goma por encima del estado de referencia, en las mismas unidades que `track_temp` (1 unidad = 40 °C) · **latente, nunca se observa**
+- `d` — fracción de goma consumida, `0` nueva … `1` gastada · **latente, nunca se observa**
 
 **El contexto** (constante dentro de un stint)
 
 | Nombre en el código | Qué es | Efecto |
 |---|---|---|
-| `q_fric` | energía de fricción por vuelta | más energía → más desgaste |
+| `q_fric` | energía de fricción por vuelta | más energía → más calor y más desgaste |
 | `load` | carga mecánica media en g | ley de Archard: `load^m` |
 | `speed` | velocidad media | más aire → más refrigeración → **menos** desgaste |
 | `track_temp` | temperatura del asfalto | activación térmica |
@@ -79,12 +101,40 @@ obs   δ(τ) = γ₁ · d
 
 - `δ` — pérdida de ritmo en segundos contra la mejor vuelta del stint
 
-### Las dos decisiones que cargan con el peso
+### El acantilado no está escrito en ninguna parte: emerge
+
+La pieza decisiva de E1 es el factor **`(1 + ζ·d)`**.
+
+Cuando la banda de rodadura adelgaza, la *misma* energía de fricción se deposita
+en *menos* masa de goma, así que la temperatura sube. Y por el término de
+Arrhenius de E2, más temperatura significa más desgaste — que adelgaza más la
+banda, que sube más la temperatura. Es **realimentación positiva**, y el
+acantilado sale de ese bucle. En ninguna línea del código pone «cae después de
+la vuelta N».
+
+La versión anterior de este modelo tenía solo E2 con `θ` congelada en cero. Con
+una ecuación y un observable lineal, la curva de ritmo solo puede doblarse en un
+sentido: se aplana y nunca se empina. Un neumático real no hace eso.
+
+E3 afila el mismo fenómeno en el observable: `γ₂·d⁸` es despreciable mientras
+`d` es moderado y domina cuando `d → 1`. El exponente 8 no se ajusta; está
+elegido para que el término sea invisible hasta que la goma esté casi acabada.
+
+### Las cuatro decisiones que cargan con el peso
+
+**`θ` comparte `Ea` con `track_temp`.** Físicamente, la activación de Arrhenius
+depende de la temperatura *absoluta* de la goma, que es el calor de la pista más
+el que ha generado la fricción; separarlas en dos coeficientes sería afirmar que
+un grado que viene del asfalto gasta distinto que un grado que viene del
+rozamiento. Pero además es lo que **fija la escala de `θ`**: como nadie la mide,
+el modelo podría encoger `θ` y agrandar `Ea` en el mismo factor sin que se note.
+Al estar `Ea` atado también a `track_temp`, que sí se mide, esa salida se cierra.
+Es la decisión estructural más importante del archivo.
 
 **El factor `(1 − d)`** acota `d` a `[0, 1]` **estructuralmente**: no puedes
-gastar más goma de la que hay. Y como mantiene la velocidad no negativa, la
-monotonía (el neumático nunca se regenera) sale de la propia ecuación, no de una
-restricción añadida después.
+gastar más goma de la que hay. Y como mantiene la velocidad no negativa —la
+realimentación térmica no cambia eso—, la monotonía sale de la propia ecuación.
+El acantilado es un **empinamiento**, nunca una inversión.
 
 **Restar una referencia en cada término** hace que `kw` signifique
 literalmente *la velocidad de desgaste en condiciones normales*. No es
@@ -94,50 +144,102 @@ pero la combinación `log(kw) − Ev` se recuperaba con un error de **0,0098**.
 El modelo sabía perfectamente cuánto se gastaba el neumático; lo que no sabía
 era a cuál de las dos constantes atribuirlo.
 
-### La propiedad que hace útil este modelo
+**`γ₁` y `A_gen` se fijan, no se estiman.** Las dos son direcciones degeneradas:
+moverte por ellas cambia el estado latente y deja el observable idéntico, así que
+ningún dato puede elegir un punto y el optimizador se desliza hasta desbordar.
+`γ₁` ancla la escala de `d`; `A_gen` la de `θ`. En `main` esta misma degeneración,
+sin cerrar, hizo divergir un entrenamiento hasta un RMSE de miles de millones de
+segundos **con la pérdida de entrenamiento baja**.
 
-Como el contexto es constante dentro de un stint, `k` también lo es, y entonces
-hay **solución exacta escrita a mano**: `d(τ) = 1 − exp(−k·τ)`.
+### El número que decide si puede haber acantilado
 
-Eso es justamente lo que lo convierte en el punto de partida correcto: permite
-comprobar el método contra una respuesta exacta antes de apuntarlo a un sistema
-donde no existe ninguna. El integrador RK4 coincide con la forma cerrada con un
-error de `1,3 × 10⁻¹¹`.
+Como `θ` se estabiliza mucho más rápido de lo que se gasta la goma, sustituyendo
+su valor de equilibrio en E2 todo se derrumba en:
+
+```
+dd/dτ = k₀ · exp(β·d) · (1 − d)      con   β = Ea·A_gen·q_fric·ζ / (h₀ + h₁·speed)
+```
+
+El desgaste **acelera** —que es literalmente lo que es un acantilado— exactamente
+mientras `β·(1 − d) > 1`, o sea mientras `d < 1 − 1/β`. De ahí:
+
+> **β ≤ 1 → no puede existir acantilado.** Ni débil ni tardío: ninguno. No hay
+> entrenamiento que encuentre un fenómeno que las ecuaciones no saben escribir.
+
+`kw` y `γ₂` solo cambian *cuándo* y *cuánto*. **β decide *si*.** Es lo primero
+que imprime `tune.py`, y con las constantes que vienen puestas vale 0,71.
+
+### Lo que costó añadir E1
+
+La solución exacta. Con `θ` en el bucle, `k` ya no es constante en el tiempo y no
+hay forma cerrada. Lo que sobrevive es `exact_solution_isothermal`, exacta **solo**
+con `A_gen = 0`: eso apaga la generación, `θ` se queda en cero y el sistema vuelve
+a ser la única ecuación que sí tiene respuesta escrita a mano. Existe para una
+cosa —validar el integrador RK4, que ahora es la única vía a la verdad— y ahí
+coincide con un error de **3,05 × 10⁻¹²**:
+
+```bash
+python tune.py --check-integrator
+```
 
 ## 3. Qué hay dentro
 
 | Fichero | Qué contiene |
 |---|---|
-| `physics.py` | La EDO, el observable, la solución exacta y un integrador RK4 |
+| `physics.py` | Las dos EDO, el observable, la solución isoterma y un integrador RK4 |
 | `data.py` | De dónde salen los stints: generador sintético **o** lector del CSV |
 | `download_data.py` | **Descarga telemetría real de la API y la deja en un CSV** |
-| `pinn.py` | El PINN en PyTorch puro: red, residuo, colocación, entrenamiento |
+| `pinn.py` | El PINN en PyTorch puro: red, residuos, colocación, entrenamiento |
 | `baseline.py` | El modelo lineal clásico contra el que se compara |
-| `evaluate.py` | RMSE, MAE, error máximo y violaciones de monotonía |
+| `evaluate.py` | RMSE, MAE, violaciones de monotonía y **vuelta del acantilado** |
 | `run.py` | Entrena, evalúa y dibuja |
-| `DOCS.md` | **Referencia completa: cada función, qué hace y cómo funciona** |
+| `tune.py` | **Banco de calibración: diagnostica las constantes sin entrenar** |
+| `TUNING.md` | **La guía para elegir los valores** |
+| `DOCS.md` | Referencia completa: cada función, qué hace y cómo funciona |
 
-La red es un perceptrón de `6 → 64 → 64 → 64 → 64 → 1` con `tanh`:
-**12 993 pesos**. Se puede cambiar sin tocar código con `--width` y `--layers`.
+La red es un perceptrón de `6 → 64 → 64 → 64 → 64 → 2` con `tanh`:
+**13 058 pesos**. Se puede cambiar sin tocar código con `--width` y `--layers`.
+Son dos salidas, `(θ, d)`, y **una sola red** para las dos: los estados están
+acoplados, así que las características que explican uno explican en gran parte
+el otro, y compartir las capas ocultas las aprende una vez en lugar de dos.
 
-La pérdida tiene tres términos:
+La pérdida tiene cuatro términos:
 
-| Término | Qué impone | Dónde |
+| Término | Bandera | Qué impone | Dónde |
+|---|---|---|---|
+| desgaste | `--w-physics` | residuo de E2 | 2 000 puntos de colocación, haya datos o no |
+| térmica | `--w-thermal` | residuo de E1 | los mismos puntos |
+| datos | `--w-data` | ajuste al ritmo medido | solo vueltas observadas |
+| condición inicial | `--w-ic` | `θ(0) = d(0) = 0` | en `τ = 0` — **ignorado con `--ic hard`** |
+
+Los pesos **son escalas, no importancias**, y `--w-thermal` está separado por una
+razón medible: `dθ/dτ` es del orden de `A_gen` (unidades) mientras `dd/dτ` es del
+orden de `kw` (una fracción). En la primera iteración de una corrida real el
+residuo térmico nace **1700 veces más grande**. TUNING.md sección 5 lo detalla.
+
+**Las condiciones iniciales van impuestas por transformación de la salida**
+(`--ic hard`, por defecto), no como término de pérdida:
+
+```
+θ(τ) = τ · N₀                      ⟹  θ(0) = 0 exacto
+d(τ) = 1 − exp(−τ · softplus(N₁))  ⟹  d(0) = 0 exacto, y 0 ≤ d < 1 siempre
+```
+
+La segunda merece leerse dos veces: no solo fija `d(0)`, hace que la saturación
+sea **estructural**. Tres modos de fallo eliminados por una línea, y sin perder
+nada — toda curva que arranca en 0 y se queda por debajo de 1 se sigue pudiendo
+escribir así. `--ic soft` conserva la formulación de libro de texto para que se
+pueda medir la diferencia.
+
+Y **diez constantes físicas** se estiman junto con los pesos de la red: un
+problema inverso completo. Se parametrizan de tres formas, y la elección codifica
+lo que sabemos:
+
+| Forma | Constantes | Por qué |
 |---|---|---|
-| física | residuo de la EDO | 2 000 puntos de colocación, haya datos o no |
-| datos | ajuste al ritmo medido | solo vueltas observadas |
-| condición inicial | `d(0) = 0` | en `τ = 0`, con contextos sorteados |
-
-Y **seis constantes físicas** se estiman junto con los pesos de la red: un
-problema inverso completo. Las cinco que tienen que ser positivas se
-parametrizan como su logaritmo, para que lo sean por construcción. `kappa` se deja
-con el signo libre, porque es la única del sistema cuyo signo no está fijado por
-la física.
-
-`gamma1` **no** se estima, y hay un motivo: lo único que se mide es `δ = γ₁·d`, así
-que dejar libres a la vez `d` y `gamma1` admite infinitas soluciones equivalentes.
-Fijar `gamma1` ancla la escala. En `main` esta misma degeneración, sin cerrar, hizo
-divergir un entrenamiento hasta un RMSE de miles de millones de segundos.
+| `log(valor)` | `kw, m, Ea, Eq, Ev, zeta, h0, h1` | No existe un coeficiente de desgaste ni un ritmo de enfriamiento negativos. Para `h0` además: con `h0 ≤ 0` la ecuación térmica es inestable y `θ` se dispara |
+| libre | `kappa` | La única cuyo signo **no** está fijado por la física: hay análisis que sostiene que 2026 invirtió el orden de los compuestos |
+| caja con sigmoide | `gamma2` | La peor identificada: solo llega al observable con `d → 1`, y los equipos paran antes. La caja afirma algo que sí sabemos: un neumático destruido cuesta unos segundos por vuelta, no millones |
 
 ## 4. Cómo correrlo
 
@@ -145,12 +247,33 @@ divergir un entrenamiento hasta un RMSE de miles de millones de segundos.
 pip install -r requirements.txt
 ```
 
+### Primero: calibrar las constantes
+
+**Antes de entrenar nada.** Las constantes de `physics.py` describen el mundo que
+simula el banco sintético, y entrenar contra un mundo que no se comporta como un
+neumático no le enseña nada útil a la red.
+
+```bash
+python tune.py                                  # diagnostica lo que hay puesto
+python tune.py --Ea 2.8 --A_gen 2.1 --zeta 2.5  # prueba otros valores
+python tune.py --sweep zeta 0.5 4.0 8           # un mando, ocho valores
+python tune.py --plot outputs/tuning.png        # mira la forma, no solo las cifras
+python tune.py --check-integrator               # valida RK4
+```
+
+No entrena nada y tarda segundos. Lo último que imprime es el bloque exacto para
+pegar en `TireParams`. **El manual completo está en [TUNING.md](TUNING.md).**
+
 ### Con datos sintéticos
 
 ```bash
 python run.py                     # 48 stints, 8 000 iteraciones, ~1 min en CPU
 python run.py --quick             # versión corta para comprobar que arranca
 python run.py --width 96 --layers 5 --iterations 15000   # red más grande
+
+python run.py --w-thermal 0.02    # reequilibra la pérdida (ver más abajo)
+python run.py --lbfgs 400         # fase de refinado tras Adam
+python run.py --ic soft           # la formulación de libro de texto, para comparar
 ```
 
 ### Con datos reales
@@ -216,91 +339,142 @@ Y hay dos correcciones sin las cuales los datos no sirven:
 
 ## 5. Resultados
 
-### Por defecto: 48 stints, 8 000 iteraciones, ~55 s de CPU
+**Advertencia antes de la primera tabla:** estos números salen de las constantes
+**sin calibrar** que vienen en `physics.py`. Describen un mundo concreto y
+arbitrario. Están aquí para enseñar qué hace la maquinaria, no como una marca a
+batir — cuando calibres, los tuyos serán otros.
+
+### Por defecto: 48 stints, 8 000 iteraciones de Adam, ~2 min de CPU
 
 ```
 python run.py
 ```
 
-| Modelo | RMSE | MAE | ErrorMax | ViolDentro | ViolExtrap |
-|---|---|---|---|---|---|
-| **PINN** | **0,048** | **0,040** | **0,113** | **0,0 %** | **0,0 %** |
-| Lineal clásico | 0,052 | 0,042 | 0,166 | 0,0 % | 0,8 % |
+| Modelo | RMSE | MAE | ErrorMax | ViolDentro | ViolExtrap | Cliff |
+|---|---|---|---|---|---|---|
+| **PINN** | **0,061** | **0,046** | **0,221** | **0,0 %** | **0,0 %** | 0 % |
+| Lineal clásico | 0,143 | 0,104 | 0,473 | **8,6 %** | **4,0 %** | 0 % |
 
 *ViolDentro / ViolExtrap = % de vueltas en las que el modelo predice que el
 neumático recupera agarre. Es imposible; el valor correcto es 0 %.*
 
-Con estos datos los dos modelos empatan prácticamente en RMSE, y **conviene
-decirlo así**: a lo largo de 12–30 vueltas la curva real está suavemente
-doblada, y una parábola ajusta muy bien una curva suavemente doblada. La
-diferencia está en el error máximo y en la extrapolación.
+**Aquí ya no empatan, y el motivo es interesante.** Con una sola EDO los dos
+modelos daban prácticamente el mismo RMSE, porque a lo largo de 12–30 vueltas la
+curva estaba suavemente doblada y una parábola ajusta muy bien una curva
+suavemente doblada. Con la realimentación térmica la curva **cambia de
+curvatura** dentro del stint, y la parábola ya no da: se le dispara el error
+máximo y empieza a predecir que el neumático recupera agarre en el 8,6 % de las
+vueltas. El PINN no lo hace nunca, y no por ajustar mejor: **tiene dentro una
+ecuación que se lo prohíbe**.
 
-Recuperación de las constantes físicas — **9,3 % de error medio**:
+La columna `Cliff` está en 0 % para los dos, y es correcto: con `β = 0,71` las
+constantes puestas no producen ninguno. El PINN está reproduciendo fielmente un
+mundo sin acantilado.
 
-| Constante | Estimado | Real | Error |
-|---|---|---|---|
-| `kw` | 0,5578 | 0,5500 | 1,4 % |
-| `m` | 1,5439 | 1,5000 | 2,9 % |
-| `Ea` | 0,8721 | 0,9500 | 8,2 % |
-| `Eq` | 0,4102 | 0,4000 | 2,5 % |
-| `Ev` | 0,2279 | 0,3500 | **34,9 %** |
-| `kappa` | 0,8003 | 0,8500 | 5,8 % |
+Recuperación de las diez constantes — **17,2 % de error medio**:
 
-### Ese 34,9 % de `Ev` no es un fallo: es falta de información
+| Constante | Estimado | Real | Error | |
+|---|---|---|---|---|
+| `kw` | 0,4292 | 0,4500 | 4,6 % | llega directa al observable |
+| `m` | 1,6128 | 1,5000 | 7,5 % | |
+| `Ea` | 0,8677 | 0,9500 | 8,7 % | |
+| `Eq` | 0,3914 | 0,4000 | 2,2 % | |
+| `Ev` | 0,3287 | 0,3500 | 6,1 % | |
+| `kappa` | 0,8277 | 0,8500 | 2,6 % | |
+| `zeta` | 0,3740 | 0,9000 | **58,4 %** | solo llega a través de `θ` |
+| `h0` | 2,7857 | 4,0000 | **30,4 %** | idem |
+| `h1` | 1,2233 | 2,0000 | **38,8 %** | idem |
+| `gamma2` | 2,4819 | 2,2000 | 12,8 % | solo actúa con `d → 1` |
 
-`Ev` es el coeficiente de refrigeración. Sobre el rango en el que varía la
-velocidad, `0,6`–`1,4`, mueve el exponente de la ecuación solo **0,28**. Para
-comparar, `kappa` lo mueve `0,85` y `Ea` lo mueve `0,95`. Es decir: `Ev` es, con
-diferencia, **el efecto más pequeño del modelo**, y por tanto el que peor se
-distingue del ruido de cronometraje.
+![Los estados latentes](outputs/04_state.png)
 
-Se comprueba dándole más datos y menos ruido:
+*Arriba `θ`, abajo `d`. Ninguna de las dos se mide jamás.*
 
-```
-python run.py --stints 140 --noise 0.02 --iterations 10000
-```
+**Esa figura es el diagnóstico, y conviene mirarla antes que el RMSE.** `d` está
+recuperada casi perfectamente en los tres compuestos —el rojo tapa al azul— pero
+`θ` sale sistemáticamente **alta**. Es la firma visual de lo que dice la tabla:
+la red acierta los segundos compensando con `zeta` y `h0` demasiado bajas, que
+producen una trayectoria de temperatura distinta pero un `d` correcto. En
+segundos el ajuste es excelente; por dentro, el neumático que el modelo imagina
+corre más caliente que el real.
 
-| Modelo | RMSE | MAE | ErrorMax | ViolDentro | ViolExtrap |
-|---|---|---|---|---|---|
-| **PINN** | **0,021** | **0,017** | **0,062** | **0,0 %** | **0,0 %** |
-| Lineal clásico | 0,048 | 0,036 | 0,222 | 2,5 % | **11,7 %** |
+Eso es exactamente lo que `04_state.png` existe para enseñar, y lo que ninguna
+métrica de error puede.
 
-| Constante | Estimado | Real | Error |
-|---|---|---|---|
-| `kw` | 0,5505 | 0,5500 | 0,1 % |
-| `m` | 1,4935 | 1,5000 | 0,4 % |
-| `Ea` | 0,9554 | 0,9500 | 0,6 % |
-| `Eq` | 0,3863 | 0,4000 | 3,4 % |
-| `Ev` | 0,3463 | 0,3500 | **1,1 %** |
-| `kappa` | 0,8446 | 0,8500 | 0,6 % |
-| | | **media** | **1,0 %** |
+El patrón es la mitad de la historia del proyecto: **las seis constantes del
+desgaste, que llegan directas al observable, se recuperan entre el 2 % y el 9 %.
+Las tres térmicas, que solo llegan a través de `θ`, están entre el 30 % y el
+58 %.** Son las peor condicionadas del sistema: mueven `θ`, `θ` mueve el ritmo de
+desgaste, el desgaste mueve `d`, y solo entonces pasa algo en segundos.
 
-Las seis constantes caen al **1,0 % de error medio**, y `Ev` pasa del 34,9 % al
-1,1 %. Con suficientes datos el problema inverso funciona; con pocos, lo primero
-que se pierde es el efecto más débil.
+### Las dos palancas que mueven eso, medidas
 
-Y aquí sí se separan los dos modelos: **el lineal extrapola mal en el 11,7 % de
-las vueltas** — dice que el neumático mejora — mientras que el PINN no lo hace
-nunca. Eso no es cuestión de ajustar mejor: es que el PINN tiene dentro una
-ecuación que se lo prohíbe, y el lineal no tiene nada.
+Con todo lo demás igual, 3 000 iteraciones:
+
+| corrida | error medio | qué cambia |
+|---|---|---|
+| por defecto | 16,3 % | `zeta` 52,9 %, `h1` 34,4 % |
+| `--w-thermal 0.02` | **13,2 %** | `Ea` 10,5 → 3,5 %, `gamma2` 18,3 → 2,8 % |
+| `--w-thermal 0.02 --lbfgs 400` | 14,6 % | `h1` 34,4 → **3,8 %**, `kw` → 0,1 %, pero `Ev` 2,4 → 22 % |
+
+`--w-thermal` existe porque los dos residuos no viven en la misma escala: en la
+primera iteración de una corrida real, `wear 0.03279` contra `heat 55.48579`. El
+térmico nace **1700 veces más grande**, así que con el peso por defecto la red
+dedica casi todo su esfuerzo a la ecuación que no tiene ni un dato que la sujete.
+
+`--lbfgs` existe porque Adam, que escala cada parámetro por su propio historial
+de gradiente, tiende a dejar las térmicas donde empezaron. Un método
+cuasi-Newton usa la curvatura y sí las mueve. No es gratis: en la misma corrida
+`Ev` empeoró.
+
+### Pero la palanca grande no es de entrenamiento, es de física
+
+`zeta` sigue clavada cerca de su valor inicial en las tres corridas de arriba. No
+es el optimizador:
+
+| | β = 0,71 (lo que viene puesto) | β = 1,94 |
+|---|---|---|
+| Subir `zeta` un 50 % mueve la curva de ritmo, como mucho | **0,469 s** | **1,445 s** |
+| `zeta` aprendida (arranca en 0,50) | 0,350 → error **61 %** | 1,677 → error **24 %** |
+| Error medio de las diez | 14,6 % | **8,6 %** |
+
+Con `β` por debajo de 1 la realimentación apenas deja huella en lo único que se
+mide, así que **no hay gradiente que seguir**. Los tres ajustes de entrenamiento
+mueven la media unos pocos puntos; un ajuste de física la mueve casi el doble.
 
 > **La lección que generaliza:** una constante solo es estimable si los datos
 > cubren el régimen donde esa constante tiene efecto, y con una amplitud que
-> destaque sobre el ruido. Es el mismo problema que en `main` obligó a fijar
-> siete de los nueve parámetros cuando se entrena con telemetría real.
+> destaque sobre el ruido. Calibrar la física no es cosmética — decide si el
+> problema inverso tiene solución. Es el mismo problema que en `main` obligó a
+> fijar siete de los nueve parámetros cuando se entrena con telemetría real.
+
+### Y una comprobación que no depende de nada de lo anterior
+
+```
+python tune.py --check-integrator
+```
+
+Poniendo `A_gen = 0` el acoplamiento se apaga y el sistema vuelve a la única
+ecuación con forma cerrada. RK4 coincide con ella con un error de
+**3,05 × 10⁻¹²**. Si eso falla, todo lo demás está midiendo ruido.
 
 ## 6. Lo que esta versión NO hace
 
 Está escrito para que se vea el hueco, no para disimularlo:
 
-- **No hay cliff.** No hay temperatura como estado propio, así que no hay
-  realimentación entre el desgaste y el calor, y la curva de ritmo solo puede
-  doblarse en un sentido. Es el paso 1 del ROADMAP y lo más importante que le
-  falta.
-- **La condición inicial es un término de pérdida**, no una restricción exacta.
-  Se cumple aproximadamente y compite por gradiente con los otros dos términos.
-- **Solo Adam.** Sin L-BFGS, que en `main` resulta ser lo único que mueve los
-  parámetros peor condicionados.
+- **Las constantes no están calibradas.** Es lo primero y es deliberado: las
+  ecuaciones son la entrega, los valores son tuyos. `python tune.py` te lo dice
+  en la primera línea, y [TUNING.md](TUNING.md) es el manual.
+- **Las tres constantes térmicas se recuperan mal** (30–58 % con las constantes
+  actuales). Parte es condicionamiento y se ataca con `--lbfgs`; parte es que
+  `β < 1` las hace casi invisibles, y eso solo se arregla calibrando.
+- **`gamma2` está débilmente identificada por construcción.** Solo entra en juego
+  con `d → 1` y los equipos paran antes. Es una limitación del problema, no del
+  método.
 - **La corrección de vuelta de carrera es una recta.** `main` ajusta un spline
   lineal a trozos, porque la forma de esa curva no tiene por qué ser lineal.
 - **Sin baseline LSTM.** Aquí solo compite el modelo lineal clásico.
+- **Sin datos reales de verdad probados de punta a punta.** El descargador está
+  escrito y probado offline, pero los servidores de datos de F1 están bloqueados
+  por la política de red del entorno donde se desarrolló, así que la llamada real
+  a la API no se ha podido ejercitar.

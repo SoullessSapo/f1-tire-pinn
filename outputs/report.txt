@@ -1,23 +1,30 @@
 48 stints | 1019 laps
   Stint length:  min=12 median=22 max=30
-  Pace loss:     min=-0.06s median=0.22s max=1.09s
+  Pace loss:     min=-0.07s median=0.29s max=3.45s
   Compounds: HARD:16, MEDIUM:16, SOFT:16
 
-Model                  RMSE      MAE    MaxErr     ViolIn   ViolExtrap
-----------------------------------------------------------------------
-PINN                  0.048    0.040     0.113       0.0%         0.0%
-Linear (classic)      0.052    0.042     0.166       0.0%         0.8%
+Model                  RMSE      MAE    MaxErr     ViolIn   ViolExtrap     Cliff CliffErr
+-----------------------------------------------------------------------------------------
+PINN                  0.061    0.046     0.221       0.0%         0.0%        0%      -
+Linear (classic)      0.143    0.104     0.473       8.6%         4.0%        0%      -
 
 ViolIn / ViolExtrap = % of laps where the model predicts the tire
 REGAINING grip. That is physically impossible: the correct value is 0 %.
+Cliff = % of test stints where the model predicts a cliff within 45 laps.
+CliffErr = mean error in WHICH lap, in laps. Blank with real data,
+where there is no true cliff lap to compare against.
 
 Inverse problem: recovery of the physical constants
 Constant      Estimated       True     Error
 ---------------------------------------------
-kw               0.5578     0.5500      1.4%
-m                1.5439     1.5000      2.9%
-Ea               0.8721     0.9500      8.2%
-Eq               0.4102     0.4000      2.5%
-Ev               0.2279     0.3500     34.9%
-kappa            0.8003     0.8500      5.8%
-                              mean      9.3%
+kw               0.4292     0.4500      4.6%
+m                1.6128     1.5000      7.5%
+Ea               0.8677     0.9500      8.7%
+Eq               0.3914     0.4000      2.2%
+Ev               0.3287     0.3500      6.1%
+kappa            0.8277     0.8500      2.6%
+zeta             0.3740     0.9000     58.4%
+h0               2.7857     4.0000     30.4%
+h1               1.2233     2.0000     38.8%
+gamma2           2.4819     2.2000     12.8%
+                              mean     17.2%

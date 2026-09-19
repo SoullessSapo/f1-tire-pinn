@@ -14,30 +14,36 @@ salió de medir que algo no funcionaba.
 | | v0 (esta rama) | `main` |
 |---|---|---|
 | Framework | PyTorch puro | DeepXDE |
-| Física | 1 EDO (desgaste) | 2 EDO acopladas (térmica + desgaste) |
-| Cliff | no representable | emerge de la realimentación |
+| Física | **2 EDO acopladas (térmica + desgaste)** | 2 EDO acopladas (térmica + desgaste) |
+| Cliff | **emerge de la realimentación** | emerge de la realimentación |
 | Entradas de la red | `(τ, q, λ, v, T_pista, c)` | `(τ, q, λ, v, T_pista, c)` |
-| Parámetros estimados | 6 | 9 |
-| Condición inicial | término de pérdida | transformación de salida (exacta) |
-| Optimizador | Adam | Adam → L-BFGS |
+| Parámetros estimados | **10** | 9 |
+| Condición inicial | **transformación de salida (exacta)** | transformación de salida (exacta) |
+| Optimizador | **Adam → L-BFGS (opcional)** | Adam → L-BFGS |
 | Datos | sintéticos **o FastF1** | FastF1, 11 carreras, 434 stints |
 | Corrección de vuelta de carrera | pendiente lineal | spline lineal a trozos |
 | Baselines | lineal | lineal + LSTM |
-| Métricas | RMSE, MAE, MaxErr, monotonía | + vuelta del cliff |
-| Tamaño de la red | 12 993 pesos | 13 058 pesos |
-| Código | 912 líneas de código + 901 de comentarios | ~2 800 líneas |
+| Métricas | RMSE, MAE, MaxErr, monotonía, **vuelta del cliff** | + vuelta del cliff |
+| Tamaño de la red | **13 058 pesos** | 13 058 pesos |
+| Constantes calibradas | **no — es tu trabajo, ver TUNING.md** | sí |
+| Código | 2 686 líneas de código + 278 de comentarios | ~2 800 líneas |
 
-Respecto a la v0 original han cambiado cuatro filas: las entradas de la red,
-los parámetros estimados, los datos y el tamaño de la red. Es decir, **el paso 2
-ya está dado y el paso 6 está a medias**.
+Respecto a la v0 original han cambiado casi todas las filas. **Los pasos 1, 2, 3
+y 5 ya están dados, el 4 está a medias y el 6 está a medias.** Lo que sigue
+separando esta rama de `main` es, sobre todo, **los datos**: aquí el banco es
+sintético y las constantes están sin calibrar.
 
-Lo que sigue separando esta rama de `main` es, sobre todo, **la física**: aquí
-no hay temperatura como estado propio, y por tanto no hay cliff. Ése es el
-paso 1, y es el que de verdad importa.
+El texto de cada paso se conserva completo, porque explica **por qué** hacía
+falta — que es lo que no se ve mirando solo el resultado.
 
 ---
 
-## Paso 1 · Acoplar la temperatura, para que exista el cliff
+## Paso 1 · Acoplar la temperatura, para que exista el cliff  ✅ HECHO EN ESTA RAMA
+
+> Las dos ecuaciones están en `physics.py` y el cliff emerge de su
+> realimentación. Lo que **no** está hecho es elegir los valores de las doce
+> constantes: con los que vienen puestos `β = 0,71` y no hay cliff. Esa parte
+> es deliberadamente del lector — ver [TUNING.md](TUNING.md).
 
 **El problema.** El modelo de v0 solo puede doblarse en un sentido. Un neumático
 real no se degrada suavemente hasta el final: en algún momento cae por un
@@ -60,9 +66,19 @@ desgaste. Es realimentación positiva, y **el cliff emerge de ella** en vez de
 estar codificado a mano. El observable pasa a ser `δ = γ₁·d + γ₂·d⁸`, donde el
 segundo término es despreciable hasta que `d → 1` y entonces domina.
 
-Coste: se pierde la solución analítica. Por eso el integrador RK4 de
-`physics.py` ya está aquí en v0, validado contra la forma cerrada mientras
-todavía era barato comprobarlo.
+Coste: se pierde la solución analítica, exactamente como estaba previsto. Por
+eso el integrador RK4 de `physics.py` se escribió y se validó cuando el modelo
+aún tenía una ecuación y había una forma cerrada contra la que compararlo. Sigue
+validándose hoy poniendo `A_gen = 0`, que apaga el acoplamiento y devuelve el
+sistema a esa única ecuación: `python tune.py --check-integrator`, y da
+**3,05 × 10⁻¹²**.
+
+**Lo que no estaba previsto** y salió al implementarlo: si la realimentación es
+demasiado débil el cliff no es que sea pequeño, es que **no existe**. El criterio
+es `β = Ea·A_gen·q·ζ/(h₀+h₁v) > 1`, y por debajo de 1 el factor `(1−d)` siempre
+gana. Peor aún, `ζ` deja de ser estimable: medido en esta rama, con `β = 0,71`
+se recupera con un 61 % de error y con `β = 1,94` con un 24 %, porque por debajo
+de 1 apenas deja huella en el observable.
 
 ## Paso 2 · Hacer la red paramétrica  ✅ HECHO EN ESTA RAMA
 
@@ -86,7 +102,10 @@ familia entera de soluciones de la EDO en todo el rango de condiciones, de una
 vez. Predecir un stint nuevo pasa a ser un forward pass. Medido en `main`:
 **0,42 ms** para 45 vueltas.
 
-## Paso 3 · Condiciones iniciales duras
+## Paso 3 · Condiciones iniciales duras  ✅ HECHO EN ESTA RAMA
+
+> Es el `--ic hard` por defecto. `--ic soft` conserva la formulación de libro
+> de texto para que se pueda medir la diferencia.
 
 **El problema.** En v0, `L_ic` es un término de pérdida. Se cumple
 aproximadamente, compite por gradiente con los otros dos, y hay que elegirle un
@@ -96,15 +115,24 @@ que un PINN no converja.
 **El cambio.** Imponerlas por transformación de la salida:
 
 ```
-θ(τ) = θ₀ + τ · N₀(x)        ⟹  θ(0) = θ₀ exactamente
-d(τ) = τ · softplus(N₁(x))   ⟹  d(0) = 0 exactamente y d ≥ 0 siempre
+θ(τ) = τ · N₀(x)                     ⟹  θ(0) = 0 exactamente
+d(τ) = 1 − exp(−τ · softplus(N₁(x))) ⟹  d(0) = 0 exactamente y 0 ≤ d < 1 siempre
 ```
+
+La segunda quedó mejor de lo planeado. La versión original, `d = τ·softplus(N₁)`,
+fija `d(0)` pero deja `d` crecer sin límite; envolverla en `1 − exp(−·)` hace que
+la **saturación** también sea estructural, y sin perder expresividad: toda curva
+que arranca en 0 y se queda por debajo de 1 se sigue pudiendo escribir así.
 
 Como `τ` multiplica la salida de la red, en `τ = 0` el término desaparece sea
 cual sea la red: la condición se cumple con error cero en toda iteración. Dos
 términos de pérdida eliminados y un problema de convergencia evitado.
 
-## Paso 4 · El problema inverso completo, y sus degeneraciones
+## Paso 4 · El problema inverso completo, y sus degeneraciones  ◐ A MEDIAS
+
+> Las degeneraciones están cerradas: `gamma1` y `A_gen` fijas, `gamma2` en una
+> caja con sigmoide (`GAMMA2_RANGE`). Lo que falta es lo que `main` aprendió
+> con datos reales — allí hubo que fijar **siete** de los nueve.
 
 **El problema.** v0 estima un parámetro y sale bien. Con nueve aparece algo que
 con uno no puede pasar: **direcciones degeneradas**. Si multiplicas `d` por ε y
@@ -126,7 +154,11 @@ millones.
 > un PINN con problema inverso, una pérdida de entrenamiento baja **no garantiza
 > nada** si el modelo tiene direcciones degeneradas.
 
-## Paso 5 · Adam → L-BFGS
+## Paso 5 · Adam → L-BFGS  ✅ HECHO EN ESTA RAMA
+
+> Está como `--lbfgs N`, apagado por defecto. Medido aquí: arregla `h1`
+> (34,4 % → 3,8 % de error) y `kw` (3,3 % → 0,1 %), pero en la misma corrida
+> `Ev` empeoró (2,4 % → 22 %). No es gratis; hay que mirar la tabla entera.
 
 **El problema.** En v0 Adam basta. Con los parámetros térmicos deja de bastar:
 `ζ`, `h₀` y `h₁` se quedan clavados durante las 15 000 iteraciones de Adam y
@@ -134,8 +166,14 @@ millones.
 condicionados del problema — solo llegan al observable a través de dos capas de
 composición — y necesitan información de curvatura para moverse.
 
-**El cambio.** Adam para explorar, L-BFGS (cuasi-Newton) para refinar. Con eso,
-los nueve parámetros se recuperan con **1,3 % de error medio**.
+**El cambio.** Adam para explorar, L-BFGS (cuasi-Newton) para refinar. En `main`,
+con eso los nueve parámetros se recuperan con **1,3 % de error medio**.
+
+Un detalle de implementación que importa: **los puntos de colocación se congelan
+durante la fase L-BFGS**. El método construye un modelo interno de la superficie
+de pérdida a partir de evaluaciones sucesivas, y resamplear entre ellas haría que
+cada evaluación fuese una función distinta — la aproximación sería de puro ruido.
+Adam lo tolera; L-BFGS no.
 
 ## Paso 6 · Datos reales  ◐ A MEDIAS EN ESTA RAMA
 
@@ -189,6 +227,10 @@ producido:
 
 ## Paso 8 · Evaluación seria
 
+> La **métrica de la vuelta del cliff ya está aquí** (`evaluate.cliff_lap`, con
+> el criterio corregido de 0,30 s/vuelta sostenido 4 vueltas). Lo que falta es el
+> baseline LSTM y la temporada completa.
+
 **El cambio.** Un baseline LSTM además del lineal (la caja negra, para tener los
 dos extremos del estado del arte), la métrica de error en la vuelta del cliff, y
 resultados sobre una temporada completa:
@@ -208,6 +250,8 @@ antes de que la física empiece a rendir.
 
 ## Qué queda por hacer
 
+- **Calibrar las doce constantes.** Es lo primero y es deliberadamente del
+  lector: `python tune.py` y [TUNING.md](TUNING.md).
 - Más temporadas. La ventaja de 2026 es real pero depende de una decisión de
   preprocesado; hace falta más datos para separarlas.
 - `γ₂` está débilmente identificado: solo entra en juego con `d → 1` y los

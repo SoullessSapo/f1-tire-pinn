@@ -66,8 +66,12 @@ class Stint:
     delta: np.ndarray         # MEASURED pace loss [s] (carries noise)
 
     # These only exist on synthetic stints, where the truth is known.
-    # They are used for checking, never for training.
+    # They are used for checking, never for training. `theta_true` is the one
+    # the coupled model added: the temperature curve nobody ever measures, kept
+    # so a run can be asked not just whether it got the seconds right but
+    # whether it got them right FOR THE RIGHT REASON.
     d_true: np.ndarray | None = None
+    theta_true: np.ndarray | None = None
     delta_clean: np.ndarray | None = None
 
     @property
@@ -123,8 +127,10 @@ def generate_synthetic(
         context = _sample_context(rng, compound)
         n_laps = int(rng.integers(min_laps, max_laps + 1))
 
-        # 1) solve the equation -> the true wear, lap by lap
-        laps, d = integrate_stint(n_laps, context, p)
+        # 1) solve BOTH equations -> the true temperature and wear, lap by lap.
+        #    There is no closed form for the coupled system, so this really is
+        #    a numerical integration now, not a convenience wrapper over one.
+        laps, theta, d = integrate_stint(n_laps, context, p)
 
         # 2) translate it into the only observable: seconds lost
         clean_delta = pace_loss(d, p)
@@ -139,6 +145,7 @@ def generate_synthetic(
                 laps=laps,
                 delta=measured_delta,
                 d_true=d,
+                theta_true=theta,
                 delta_clean=clean_delta,
             )
         )
