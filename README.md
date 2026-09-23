@@ -298,7 +298,22 @@ Y después se entrena con ellos:
 
 ```bash
 python run.py --source csv --csv data/2023.csv
+
+# Solo con algunos pilotos (mayúsculas o minúsculas, da igual)
+python run.py --source csv --csv data/2023.csv --drivers VER HAM
 ```
+
+**`--drivers` está en los dos programas y no hace lo mismo.** En
+`download_data.py` filtra lo que se descarga; en `run.py`, con qué se entrena.
+Para comparar pilotos, descarga a todos una vez y filtra al entrenar: probar otro
+piloto no cuesta otra descarga. Un código que no está en el CSV es un error que
+lista los que sí están, no algo que se ignore en silencio.
+
+Menos pilotos son menos stints. Un piloto en una carrera suele dar dos o tres, y
+hacen falta al menos dos (uno para entrenar, otro para evaluar); con tan pocos,
+el test es un solo stint y las cifras bailan de una semilla a otra. Para un
+piloto, junta varias carreras. Y si entrenas a VER y a HAM por separado y
+comparas las constantes, la diferencia mezcla piloto **y** coche.
 
 `python download_data.py --explain-columns` explica de dónde sale cada columna
 del CSV, y `--help` lista todas las opciones.

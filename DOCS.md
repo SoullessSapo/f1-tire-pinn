@@ -9,11 +9,11 @@ choose the physical constants**, see [TUNING.md](TUNING.md) — the code ships
 with the equations, not with a calibration. For the path from this branch to
 `main`, see [ROADMAP.md](ROADMAP.md).
 
-**A note on shape.** 119 functions, median 9 lines of code each, longest 47 —
+**A note on shape.** 120 functions, median 9 lines of code each, longest 53 —
 and the two longest are flat lists of command-line declarations. Nothing is
 split for the sake of it; things are split so that reading a caller tells you
 *what* happens and opening one callee tells you *how*, without ever holding more
-than a screen in your head. All 126 functions and classes have a docstring.
+than a screen in your head. All 127 functions and classes have a docstring.
 
 ---
 
@@ -256,6 +256,7 @@ reports a worst discrepancy of **3.05e-12**.
 | `context` | `Context` | The five conditions. |
 | `laps` | array | Lap number within the stint: 1, 2, 3 … |
 | `delta` | array | **Measured** pace loss in seconds. Carries noise. |
+| `driver` | str or None | Three-letter code. Real stints only — a simulated stint was driven by nobody. |
 | `d_true` | array or None | True wear. Synthetic only. **Checking, never training.** |
 | `theta_true` | array or None | True temperature. Synthetic only. Kept so a run can be asked not just whether it got the seconds right but whether it got them right **for the right reason**. |
 | `delta_clean` | array or None | Noise-free pace curve. Synthetic only. |
@@ -271,12 +272,13 @@ reports a worst discrepancy of **3.05e-12**.
 | Function | What it does | How it works |
 |---|---|---|
 | `generate_synthetic(n_stints=48, p=GROUND_TRUTH, noise_s=0.05, min_laps=12, max_laps=30, seed=0)` | Simulate stints with known constants. | For each stint: pick a compound (cycling), draw a context from `CONTEXT_RANGES`, integrate **both** equations, convert `d` to seconds with `pace_loss`, then add Gaussian noise. There is no closed form for the coupled system, so this really is a numerical integration now. The noise matters — without it the fit is trivial and the physics term has nothing to do. |
-| `load_csv(path, min_laps=8)` | Read the CSV from `download_data.py`. | Groups rows by `stint_id`, sorts by `stint_lap`, checks the required columns are present and drops short stints. Raises `FileNotFoundError` with the exact download command if the file is missing. |
+| `load_csv(path, min_laps=8, drivers=())` | Read the CSV from `download_data.py`. | Groups rows by `stint_id`, sorts by `stint_lap`, checks the required columns are present and drops short stints. Raises `FileNotFoundError` with the exact download command if the file is missing. With `drivers`, keeps only those drivers' rows **before** the length check, so the discarded count and the errors speak about the drivers asked for; warns when a requested driver loses every stint to that check. |
 | `split(stints, test_fraction=0.25, seed=0)` | Train/test split. | Permutes stint indices and takes a slice. **By whole stint, never by lap** — splitting by lap leaks, and it is the worst kind of leak because it flatters every model equally and cannot be spotted by comparing them. |
 | `flatten(stints)` | Stints → the two matrices that train the network. | Returns `inputs (N, 6)` and `delta (N, 1)`. The constant context is tiled across the stint's laps with `np.tile`, which is what lets the network learn the effect of time and of conditions at once. |
 | `_read_rows(path)` | Internal. Read the CSV and check the required columns exist. | Raises `FileNotFoundError` carrying the exact download command, or `ValueError` naming the missing columns. |
-| `_stint_from_rows(id, rows)` | Internal. Build one `Stint` from its sorted rows. | Reads the context off the first row; every row of a stint carries the same value. |
-| `describe(stints)` | A paragraph summarising the set. | Counts, lengths, pace-loss range and compound breakdown. Printed before training and written into `report.txt`. |
+| `_stint_from_rows(id, rows)` | Internal. Build one `Stint` from its sorted rows. | Reads the context and the driver off the first row; every row of a stint carries the same value. |
+| `_only_drivers(rows, drivers, path)` | Internal. The driver filter. | Case-insensitive. A requested driver who is not in the file raises `ValueError` listing who is — skipping it would let a typo (`VER HMA`) quietly train on VER alone and answer a different question. |
+| `describe(stints)` | A paragraph summarising the set. | Counts, lengths, pace-loss range, compound breakdown and, on real data, stints per driver. Printed before training and written into `report.txt`. |
 | `_sample_context(rng, compound)` | Internal. Draw plausible conditions. | Uniform within each `CONTEXT_RANGES` entry, except `compound`, which the caller decides. |
 
 ---
@@ -471,7 +473,7 @@ happens; opening one function tells you how.
 
 | Step | Function | What it does |
 |---|---|---|
-| 1 | `get_stints(args)` | Simulate stints, or read the CSV. Returns `None` on a read failure, which `main` turns into a clean exit instead of a traceback. |
+| 1 | `get_stints(args)` | Simulate stints, or read the CSV (filtered by `--drivers` if given). Returns `None` on a read failure, or when fewer than 2 stints survive — the split needs one on each side, and one driver in one race is often only two or three. `main` turns `None` into a clean exit instead of a traceback. |
 | 2 | `train_pinn(inputs, delta, args)` | Build the network and train it. |
 | 3 | `train_baseline(inputs, delta)` | Fit the rival on exactly the same data. |
 | 4 | `build_report(model, linear, test, synthetic)` | Measure both and assemble the text report. Delegates to `_results_table`, and then to `_recovery_table` (synthetic) or `_estimates_list` (real). |
@@ -495,6 +497,7 @@ the true constants were recovered — which is impossible with real data.
 | `--stints N` | `48` | How many stints to simulate. |
 | `--noise S` | `0.05` | Timing noise in seconds, synthetic only. |
 | `--min-laps N` | `8` | Discard shorter stints, CSV only. |
+| `--drivers CODE ...` | everyone | Train and test only on these drivers' stints, CSV only. Case-insensitive. Asking for it with `--source synthetic` is an error, not a silent no-op. |
 | `--width N` | `64` | Neurons per layer. |
 | `--layers N` | `4` | Hidden layers. |
 | `--iterations N` | `8000` | Adam iterations (phase 1). |
@@ -604,7 +607,7 @@ This was a real mistake in the project and cost a redesign.
 | `--year N` | `2023` | Season. |
 | `--races A B C` | `Monza` | One or more Grands Prix. |
 | `--session S` | `R` | `R` race, `Q` qualifying, `FP1`–`FP3` practice. |
-| `--drivers ...` | all | Three-letter codes. |
+| `--drivers ...` | all | Three-letter codes. Filters the **download**. To compare drivers, download everyone once and filter at training time with `run.py --drivers` instead: no second download. |
 | `--max-drivers N` | all | Limit for quick tests. |
 | `--min-laps N` | `8` | Discard shorter stints. |
 | `--max-delta S` | `6.0` | Discard laps losing more than this (traffic). |

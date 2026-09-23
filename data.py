@@ -65,6 +65,9 @@ class Stint:
     laps: np.ndarray          # lap within the stint: 1, 2, 3, ...
     delta: np.ndarray         # MEASURED pace loss [s] (carries noise)
 
+    # Only real stints have one: a simulated stint was driven by nobody.
+    driver: str | None = None
+
     # These only exist on synthetic stints, where the truth is known.
     # They are used for checking, never for training. `theta_true` is the one
     # the coupled model added: the temperature curve nobody ever measures, kept
@@ -204,10 +207,33 @@ def _stint_from_rows(stint_id: str, rows: list[dict]) -> Stint:
         ),
         laps=np.array([float(r["stint_lap"]) for r in rows]),
         delta=np.array([float(r["delta"]) for r in rows]),
+        driver=first.get("driver") or None,
     )
 
 
-def load_csv(path: str | Path, min_laps: int = 8) -> list[Stint]:
+def _only_drivers(rows: list[dict], drivers, path: Path) -> list[dict]:
+    """Keep the rows of these drivers, or say exactly why that is impossible.
+
+    A driver that is not in the file is an error, not something to skip: with
+    `--drivers VER HMA` (a typo) silently training on VER alone would give
+    results that look fine and answer a different question than the one asked.
+    """
+    if "driver" not in rows[0]:
+        raise ValueError(f"{path} has no 'driver' column, so it cannot be filtered")
+
+    wanted = {d.upper() for d in drivers}
+    present = {r["driver"].upper() for r in rows}
+    missing = sorted(wanted - present)
+    if missing:
+        raise ValueError(
+            f"{path} has no laps from {', '.join(missing)}. "
+            f"The drivers in it are: {' '.join(sorted(present))}"
+        )
+
+    return [r for r in rows if r["driver"].upper() in wanted]
+
+
+def load_csv(path: str | Path, min_laps: int = 8, drivers=()) -> list[Stint]:
     """Read the CSV from `download_data.py` and turn it into stints.
 
     The CSV has one row per lap. Here they are grouped by `stint_id`, since the
@@ -215,9 +241,15 @@ def load_csv(path: str | Path, min_laps: int = 8) -> list[Stint]:
 
     Stints with fewer than `min_laps` valid laps are discarded: with four
     points you cannot tell a curve from a straight line.
+
+    `drivers` (three-letter codes, any case) keeps only those drivers' stints.
+    Empty keeps everyone. Filtering happens BEFORE the length check, so the
+    discarded count and the errors below speak about the drivers asked for.
     """
     path = Path(path)
     rows = _read_rows(path)
+    if drivers:
+        rows = _only_drivers(rows, drivers, path)
 
     # Group by stint, keeping the order they appeared in.
     groups: dict[str, list[dict]] = {}
@@ -242,6 +274,13 @@ def load_csv(path: str | Path, min_laps: int = 8) -> list[Stint]:
 
     if discarded:
         print(f"  {discarded} stints discarded for having fewer than {min_laps} laps")
+
+    # A driver can be in the file and still lose every stint to the length
+    # check. That is not an error, but it must not go unnoticed.
+    kept = {s.driver.upper() for s in stints if s.driver}
+    for driver in sorted({d.upper() for d in drivers} - kept):
+        print(f"  WARNING: every {driver} stint is shorter than {min_laps} laps, "
+              "none kept")
 
     return stints
 
@@ -307,7 +346,7 @@ def describe(stints: list[Stint]) -> str:
         counts[s.compound] = counts.get(s.compound, 0) + 1
     by_compound = ", ".join(f"{k}:{v}" for k, v in sorted(counts.items()))
 
-    return (
+    text = (
         f"{len(stints)} stints | {int(lengths.sum())} laps\n"
         f"  Stint length:  min={lengths.min()} "
         f"median={np.median(lengths):.0f} max={lengths.max()}\n"
@@ -315,3 +354,13 @@ def describe(stints: list[Stint]) -> str:
         f"median={np.median(deltas):.2f}s max={deltas.max():.2f}s\n"
         f"  Compounds: {by_compound}"
     )
+
+    drivers: dict[str, int] = {}
+    for s in stints:
+        if s.driver:
+            drivers[s.driver] = drivers.get(s.driver, 0) + 1
+    if drivers:
+        text += "\n  Drivers:   " + ", ".join(
+            f"{k}:{v}" for k, v in sorted(drivers.items())
+        )
+    return text

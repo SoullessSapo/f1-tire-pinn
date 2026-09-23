@@ -3,7 +3,7 @@ torch>=2.0
 numpy>=1.24
 matplotlib>=3.7
 
-# Para descargar datos reales (descargar_datos.py).
+# Para descargar datos reales (download_data.py).
 # Si solo vas a usar el banco sintetico, puedes saltartelas.
 fastf1>=3.3
 pandas>=2.0

@@ -5,6 +5,7 @@ TRAIN AND COMPARE
     python run.py                                 # synthetic data
     python run.py --quick                         # short run, just to check
     python run.py --source csv --csv data/2023.csv  # real downloaded data
+    python run.py --source csv --csv data/2023.csv --drivers VER HAM
 
     python run.py --width 96 --layers 5           # bigger network
     python run.py --stints 64 --iterations 12000  # longer training
@@ -84,6 +85,9 @@ def parse_args() -> argparse.Namespace:
                    help="timing noise in seconds (synthetic only)")
     g.add_argument("--min-laps", type=int, default=8,
                    help="discard shorter stints (only with --source csv)")
+    g.add_argument("--drivers", nargs="+", default=[], metavar="CODE",
+                   help="train and test only on these drivers' stints, e.g. "
+                        "VER HAM (only with --source csv). Default: everyone")
 
     g = p.add_argument_group("the network")
     g.add_argument("--width", type=int, default=64, help="neurons per layer")
@@ -121,7 +125,10 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--quick", action="store_true",
                    help="1500 iterations and 18 stints, just to check it runs")
 
-    return p.parse_args()
+    args = p.parse_args()
+    if args.drivers and args.source != "csv":
+        p.error("--drivers needs --source csv: a simulated stint has no driver")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -362,13 +369,24 @@ def get_stints(args) -> list | None:
         return stints
 
     try:
-        stints = data.load_csv(args.csv, min_laps=args.min_laps)
+        stints = data.load_csv(args.csv, min_laps=args.min_laps,
+                               drivers=args.drivers)
     except (FileNotFoundError, ValueError) as error:
         # A clear message beats a twenty-line traceback.
         print(f"\nCould not load the data:\n  {error}")
         return None
 
-    print(f"\nSource: {args.csv}")
+    # The split needs one stint on each side. One driver in one race is
+    # usually two or three stints, so this is easy to hit with --drivers.
+    if len(stints) < 2:
+        print(f"\nOnly {len(stints)} stint left, and at least 2 are needed: one "
+              "to train, one to test. Add drivers, races, or lower --min-laps.")
+        return None
+
+    label = args.csv
+    if args.drivers:
+        label += f" (drivers: {' '.join(d.upper() for d in args.drivers)})"
+    print(f"\nSource: {label}")
     return stints
 
 
