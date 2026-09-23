@@ -1,722 +1,495 @@
-# F1 Tire PINN
+# PINN de degradación de neumáticos — v0
 
-A Physics-Informed Neural Network that predicts Formula 1 tire degradation and
-the lap at which the performance **cliff** hits, built with **DeepXDE** on
-PyTorch.
+**Implementación inicial.** Una red neuronal a la que se le imponen dos
+ecuaciones diferenciales acopladas, aplicada a la degradación de un neumático de
+Fórmula 1. Es el cimiento del proyecto: el mínimo que demuestra que el método
+funciona, escrito para poder leerse entero de una sentada.
 
-This is the modelling half of the project *Real-Time Prediction of Formula 1 Tire
-Degradation using Physics-Informed Neural Networks*. **The AWS cloud layer is out
-of scope**: what lives here is the physical system, the network, offline
-training, the comparison baselines and the evaluation.
+Sin frameworks de PINN — los residuos están escritos a mano con PyTorch — y con
+dos fuentes de datos: un banco sintético donde se conoce la respuesta, y
+telemetría real descargada de la API de Fórmula 1.
 
-![Extrapolation: PINN vs black box](outputs/02_extrapolation.png)
+> ### ⚠ Las ecuaciones están puestas; las constantes no están calibradas
+>
+> Esta rama trae el **sistema acoplado completo**: la EDO térmica, la del
+> desgaste, su realimentación y el observable con término de acantilado. Lo que
+> **no** trae son los valores correctos de las doce constantes físicas: los que
+> hay en `physics.py` son un punto de partida.
+>
+> Con ellos, `beta = 0,71` y **no hay acantilado** (el porqué está abajo).
+> Calibrarlos es el trabajo, y hay una herramienta y una guía para hacerlo:
+>
+> ```bash
+> python tune.py          # diagnostica las constantes sin entrenar nada
+> ```
+>
+> **→ [TUNING.md](TUNING.md) es el manual.**
 
-*The figure that sums up the whole project. The grey band is the observed laps;
-to the right of the dashed line every model is extrapolating. In the left panel
-the LSTM (blue) **bends downwards** — it predicts the tire regains grip, which is
-thermodynamically impossible. In the middle panel the linear model (grey) goes
-negative: it predicts the tire is faster than new. The PINN (red) keeps
-integrating the differential equation and saturates where it should.*
+> La versión avanzada está en la rama `main`: la misma física, una temporada
+> completa de resultados y nueve parámetros estimados. El camino de aquí hasta
+> allí, paso a paso, está en [ROADMAP.md](ROADMAP.md).
+
+> **El código está en inglés** (identificadores, comentarios y salida por consola), igual que en `main`, para que pasar de una rama a otra no obligue a traducir nada. Este README, el ROADMAP y la guía de ajuste siguen en castellano.
+> La referencia función por función está en [DOCS.md](DOCS.md).
+
+![Ajuste y extrapolación](outputs/01_fit.png)
+
+*Los tres compuestos. La zona gris es lo que el modelo vio; a la derecha de la
+línea discontinua todos los modelos extrapolan. La curva roja del PINN queda
+encima de la curva verdadera (azul).*
 
 ---
 
-## 1. The physical model
+## 1. La idea, en cuatro pasos
 
-Two coupled dimensionless ODEs describe the life of a stint:
+Una red neuronal es una función parametrizada, `d = N(τ, contexto ; W)`, y
+entrenarla es buscar los pesos `W` que minimizan una pérdida. Lo que convierte
+eso en un PINN es una sola observación:
+
+1. La diferenciación automática puede derivar la salida de la red **respecto a
+   sus entradas**, de forma exacta y barata.
+2. Así que se puede calcular el **residuo** de cada ecuación diferencial que la
+   física dice que se cumple: `r_d = dd/dτ − wear_rate(d, θ, contexto)` y
+   `r_θ = dθ/dτ − thermal_rate(θ, d, contexto)`.
+3. Evaluar ese residuo necesita **un punto del dominio y nada más**. No hace
+   falta saber la respuesta correcta ahí.
+4. Metiendo `r²` en la pérdida, la red obedece las ecuaciones — incluso en
+   vueltas donde no hay ni un solo dato.
+
+Aquí eso importa el doble, porque **`θ` no se mide en ninguna parte**: lo único
+que sujeta la curva de temperatura es la ecuación.
+
+El paso 3 es todo el truco. El término de física se exige en 2 000 puntos
+repartidos hasta la vuelta 45, mucho más allá del stint más largo del conjunto,
+y en combinaciones de condiciones que no se dieron en ninguna carrera.
+
+## 2. El modelo físico
+
+Dos EDO acopladas, cinco variables de contexto y un observable:
 
 ```
-(E1)  dθ/dτ = A_gen · q · (1 + ζ·d)  −  (h₀ + h₁·v) · θ        thermal balance
-(E2)  dd/dτ = k_w · λ^m · exp(E_a·(θ + T_trk) − κ·c) · (1 − d)  wear
+(E1)  dθ/dτ = A_gen·q_fric·(1 + ζ·d) − (h₀ + h₁·speed)·θ      la térmica
+
+(E2)  dd/dτ = k(contexto, θ) · (1 − d)                         el desgaste
+
+      k = kw · (load/load_ref)^m
+             · exp( Ea·(track_temp − temp_ref + θ)
+                  + Eq·(q_fric     − q_ref)
+                  − Ev·(speed      − speed_ref)
+                  − kappa·(compound − compound_ref) )
+
+(E3)  δ(τ) = γ₁·d + γ₂·d⁸                                      el observable
 ```
 
-| Symbol | Meaning | Source |
+**El tiempo y los dos estados**
+
+- `τ` — tiempo adimensional del stint, `vuelta / 30`
+- `θ` — temperatura de la goma por encima del estado de referencia, en las mismas unidades que `track_temp` (1 unidad = 40 °C) · **latente, nunca se observa**
+- `d` — fracción de goma consumida, `0` nueva … `1` gastada · **latente, nunca se observa**
+
+**El contexto** (constante dentro de un stint)
+
+| Nombre en el código | Qué es | Efecto |
 |---|---|---|
-| `τ` | stint lap / `L_ref` | dimensionless time |
-| `θ` | `(T_surface − T_track) / ΔT_ref` | **latent state**, never observed |
-| `d` | fraction of tread consumed | **latent state**, never observed |
-| `q` | specific frictional energy per lap | telemetry |
-| `λ` | mean mechanical load in g | telemetry |
-| `v` | mean speed (convective cooling) | telemetry |
-| `T_trk` | normalised track temperature | session weather |
-| `c` | compound hardness (0 soft … 1 hard) | timing |
+| `q_fric` | energía de fricción por vuelta | más energía → más calor y más desgaste |
+| `load` | carga mecánica media en g | ley de Archard: `load^m` |
+| `speed` | velocidad media | más aire → más refrigeración → **menos** desgaste |
+| `track_temp` | temperatura del asfalto | activación térmica |
+| `compound` | 0 blando … 1 duro | más duro → **menos** desgaste |
 
-**(E1)** is a lumped-capacitance heat balance: frictional generation minus
-exponential surface decay. **(E2)** combines Archard's wear law with an
-Arrhenius thermal activation — wear grows exponentially with temperature.
+**Lo único que se mide**
 
-Two factors do the heavy lifting:
+- `δ` — pérdida de ritmo en segundos contra la mejor vuelta del stint
 
-- **`(1 − d)` in (E2)** bounds `d ∈ [0,1]` *structurally*. You cannot consume more
-  tread than exists. The physical bound is enforced by the equation itself, not by
-  a penalty term.
-- **`(1 + ζ·d)` in (E1)** is what drives the cliff: as the tread thins, the same
-  frictional energy is deposited into less rubber → temperature rises → Arrhenius
-  accelerates wear → the tread thins faster. It is positive feedback, so **the
-  cliff emerges from the coupled dynamics instead of being hard-coded**. This is
-  exactly the kind of constraint an LSTM has no way of knowing.
+### El acantilado no está escrito en ninguna parte: emerge
 
-The measurable observable is not `d` but the pace loss:
+La pieza decisiva de E1 es el factor **`(1 + ζ·d)`**.
 
-```
-δ(τ) = γ₁·d + γ₂·d^p        (p = 8)
-```
+Cuando la banda de rodadura adelgaza, la *misma* energía de fricción se deposita
+en *menos* masa de goma, así que la temperatura sube. Y por el término de
+Arrhenius de E2, más temperatura significa más desgaste — que adelgaza más la
+banda, que sube más la temperatura. Es **realimentación positiva**, y el
+acantilado sale de ese bucle. En ninguna línea del código pone «cae después de
+la vuelta N».
 
-`γ₁·d` is gradual degradation; `γ₂·d^p` is negligible until `d` approaches 1 and
-then dominates — the grip collapse.
+La versión anterior de este modelo tenía solo E2 con `θ` congelada en cero. Con
+una ecuación y un observable lineal, la curva de ritmo solo puede doblarse en un
+sentido: se aplana y nunca se empina. Un neumático real no hace eso.
 
----
+E3 afila el mismo fenómeno en el observable: `γ₂·d⁸` es despreciable mientras
+`d` es moderado y domina cuando `d → 1`. El exponente 8 no se ajusta; está
+elegido para que el término sea invisible hasta que la goma esté casi acabada.
 
-## 2. Why this PINN is parametric
+### Las cuatro decisiones que cargan con el peso
 
-A textbook PINN solves **one** trajectory: the network takes `t` and returns the
-state. That would mean retraining for every stint, which is useless for live
-inference. Here the network is a **solution operator**:
+**`θ` comparte `Ea` con `track_temp`.** Físicamente, la activación de Arrhenius
+depende de la temperatura *absoluta* de la goma, que es el calor de la pista más
+el que ha generado la fricción; separarlas en dos coeficientes sería afirmar que
+un grado que viene del asfalto gasta distinto que un grado que viene del
+rozamiento. Pero además es lo que **fija la escala de `θ`**: como nadie la mide,
+el modelo podría encoger `θ` y agrandar `Ea` en el mismo factor sin que se note.
+Al estar `Ea` atado también a `track_temp`, que sí se mide, esa salida se cierra.
+Es la decisión estructural más importante del archivo.
 
-```
-N(τ, q, λ, v, T_trk, c) → (θ, d)
-```
+**El factor `(1 − d)`** acota `d` a `[0, 1]` **estructuralmente**: no puedes
+gastar más goma de la que hay. Y como mantiene la velocidad no negativa —la
+realimentación térmica no cambia eso—, la monotonía sale de la propia ecuación.
+El acantilado es un **empinamiento**, nunca una inversión.
 
-It learns the entire *family* of solutions to the ODE across the full range of
-race conditions, once. Predicting a new stint is **a single forward pass** — no
-retraining, no integration. That is what makes the offline-training /
-online-inference split viable.
+**Restar una referencia en cada término** hace que `kw` signifique
+literalmente *la velocidad de desgaste en condiciones normales*. No es
+cosmética: sin centrar, `kw` y `Ev` se pisan. Está medido en este mismo
+proyecto — sin centrar, `kw` salía con un 10 % de error y `Ev` con un 33 %,
+pero la combinación `log(kw) − Ev` se recuperaba con un error de **0,0098**.
+El modelo sabía perfectamente cuánto se gastaba el neumático; lo que no sabía
+era a cuál de las dos constantes atribuirlo.
 
-### Loss function
+**`γ₁` y `A_gen` se fijan, no se estiman.** Las dos son direcciones degeneradas:
+moverte por ellas cambia el estado latente y deja el observable idéntico, así que
+ningún dato puede elegir un punto y el optimizador se desliza hasta desbordar.
+`γ₁` ancla la escala de `d`; `A_gen` la de `θ`. En `main` esta misma degeneración,
+sin cerrar, hizo divergir un entrenamiento hasta un RMSE de miles de millones de
+segundos **con la pérdida de entrenamiento baja**.
 
-| Term | What it enforces | Where |
-|---|---|---|
-| `L1` | residual of (E1) | the whole condition hypercube |
-| `L2` | residual of (E2) | the whole condition hypercube |
-| `L3` | bound `d ≤ d_max` | the whole hypercube |
-| `L4` | fit to measured pace loss | observed points only |
-| `L5` | temperature proxy (optional) | observed points only |
+### El número que decide si puede haber acantilado
 
-`L1`–`L3` are enforced **even where there is no data**, out to the full decision
-horizon (45 laps by default) rather than just as far as the longest observed
-stint. That is the edge over a black box: outside its training distribution, an
-LSTM has nothing tying it to thermodynamics.
-
-### Hard initial conditions
-
-Imposed by output transform, not as loss terms:
+Como `θ` se estabiliza mucho más rápido de lo que se gasta la goma, sustituyendo
+su valor de equilibrio en E2 todo se derrumba en:
 
 ```
-θ(τ) = θ₀ + τ · N₀(x)          ⟹  θ(0) = θ₀ exactly
-d(τ) = τ · softplus(N₁(x))     ⟹  d(0) = 0 exactly and d ≥ 0 always
+dd/dτ = k₀ · exp(β·d) · (1 − d)      con   β = Ea·A_gen·q_fric·ζ / (h₀ + h₁·speed)
 ```
 
-This removes two loss terms, and with them the weight-balancing problem that is
-the single most common cause of PINN convergence failures.
+El desgaste **acelera** —que es literalmente lo que es un acantilado— exactamente
+mientras `β·(1 − d) > 1`, o sea mientras `d < 1 − 1/β`. De ahí:
 
-### Inverse problem
+> **β ≤ 1 → no puede existir acantilado.** Ni débil ni tardío: ninguno. No hay
+> entrenamiento que encuentre un fenómeno que las ecuaciones no saben escribir.
 
-The physical coefficients (`ζ, h₀, h₁, k_w, m, E_a, κ, γ₁, γ₂`) are unknown: they
-are estimated **jointly** with the network weights as `dde.Variable`. They are
-parametrised in log space, so they are positive by construction — which is what
-their physical meaning demands.
+`kw` y `γ₂` solo cambian *cuándo* y *cuánto*. **β decide *si*.** Es lo primero
+que imprime `tune.py`, y con las constantes que vienen puestas vale 0,71.
 
-### The two degeneracies (and how they are closed)
+### Lo que costó añadir E1
 
-This model has **two exactly degenerate directions**. Ignoring them does not
-produce a mediocre fit — it produces divergence.
-
-**1. Temperature scale.** If `A_gen`, the scale of `θ` and `E_a` were all free,
-doubling `A_gen` and halving `E_a` would leave wear unchanged. Closed by
-**fixing `A_gen`**, which anchors the thermal scale. Under `--source synthetic`
-the weak temperature supervision (`L5`) helps too; with real data `L5` is
-disabled automatically, because internal tire temperature is not public.
-
-**2. Wear scale.** This is the dangerous one:
-
-```
-d → ε·d ,  γ₁ → γ₁/ε ,  γ₂ → γ₂/ε^p     leaves δ exactly unchanged
-```
-
-On the synthetic bench two things break it: the thermal proxy, and the stints
-that saturate at `d = 1`. **With real data neither exists**, and the optimiser
-slides along that direction until it overflows. This happened literally: a run on
-Monza + Hungary ended with `γ₂ = 2.5 × 10¹³`, `k_w = 0.026` and a test RMSE of
-5.8 × 10⁹ s — with a **low training loss** (0.117), because along the degenerate
-direction the fit is perfect.
-
-Closed by bounding `γ₁ ∈ [0.2, 4.0] s` and `γ₂ ∈ [0.2, 6.0] s` through a sigmoid
-(`gamma1_bounds`, `gamma2_bounds` in `PhysicsConfig`). This is not numerical
-caution: it asserts something we genuinely know — a destroyed tire costs a few
-seconds a lap, not millions.
-
-> The general lesson: in a PINN with an inverse problem, **a low training loss
-> guarantees nothing** if the model has degenerate directions. You have to
-> enumerate them and close them explicitly.
-
----
-
-## 3. Installation
+La solución exacta. Con `θ` en el bucle, `k` ya no es constante en el tiempo y no
+hay forma cerrada. Lo que sobrevive es `exact_solution_isothermal`, exacta **solo**
+con `A_gen = 0`: eso apaga la generación, `θ` se queda en cero y el sistema vuelve
+a ser la única ecuación que sí tiene respuesta escrita a mano. Existe para una
+cosa —validar el integrador RK4, que ahora es la única vía a la verdad— y ahí
+coincide con un error de **3,05 × 10⁻¹²**:
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+python tune.py --check-integrator
+```
+
+## 3. Qué hay dentro
+
+| Fichero | Qué contiene |
+|---|---|
+| `physics.py` | Las dos EDO, el observable, la solución isoterma y un integrador RK4 |
+| `data.py` | De dónde salen los stints: generador sintético **o** lector del CSV |
+| `download_data.py` | **Descarga telemetría real de la API y la deja en un CSV** |
+| `pinn.py` | El PINN en PyTorch puro: red, residuos, colocación, entrenamiento |
+| `baseline.py` | El modelo lineal clásico contra el que se compara |
+| `evaluate.py` | RMSE, MAE, violaciones de monotonía y **vuelta del acantilado** |
+| `run.py` | Entrena, evalúa y dibuja |
+| `tune.py` | **Banco de calibración: diagnostica las constantes sin entrenar** |
+| `TUNING.md` | **La guía para elegir los valores** |
+| `DOCS.md` | Referencia completa: cada función, qué hace y cómo funciona |
+
+La red es un perceptrón de `6 → 64 → 64 → 64 → 64 → 2` con `tanh`:
+**13 058 pesos**. Se puede cambiar sin tocar código con `--width` y `--layers`.
+Son dos salidas, `(θ, d)`, y **una sola red** para las dos: los estados están
+acoplados, así que las características que explican uno explican en gran parte
+el otro, y compartir las capas ocultas las aprende una vez en lugar de dos.
+
+La pérdida tiene cuatro términos:
+
+| Término | Bandera | Qué impone | Dónde |
+|---|---|---|---|
+| desgaste | `--w-physics` | residuo de E2 | 2 000 puntos de colocación, haya datos o no |
+| térmica | `--w-thermal` | residuo de E1 | los mismos puntos |
+| datos | `--w-data` | ajuste al ritmo medido | solo vueltas observadas |
+| condición inicial | `--w-ic` | `θ(0) = d(0) = 0` | en `τ = 0` — **ignorado con `--ic hard`** |
+
+Los pesos **son escalas, no importancias**, y `--w-thermal` está separado por una
+razón medible: `dθ/dτ` es del orden de `A_gen` (unidades) mientras `dd/dτ` es del
+orden de `kw` (una fracción). En la primera iteración de una corrida real el
+residuo térmico nace **1700 veces más grande**. TUNING.md sección 5 lo detalla.
+
+**Las condiciones iniciales van impuestas por transformación de la salida**
+(`--ic hard`, por defecto), no como término de pérdida:
+
+```
+θ(τ) = τ · N₀                      ⟹  θ(0) = 0 exacto
+d(τ) = 1 − exp(−τ · softplus(N₁))  ⟹  d(0) = 0 exacto, y 0 ≤ d < 1 siempre
+```
+
+La segunda merece leerse dos veces: no solo fija `d(0)`, hace que la saturación
+sea **estructural**. Tres modos de fallo eliminados por una línea, y sin perder
+nada — toda curva que arranca en 0 y se queda por debajo de 1 se sigue pudiendo
+escribir así. `--ic soft` conserva la formulación de libro de texto para que se
+pueda medir la diferencia.
+
+Y **diez constantes físicas** se estiman junto con los pesos de la red: un
+problema inverso completo. Se parametrizan de tres formas, y la elección codifica
+lo que sabemos:
+
+| Forma | Constantes | Por qué |
+|---|---|---|
+| `log(valor)` | `kw, m, Ea, Eq, Ev, zeta, h0, h1` | No existe un coeficiente de desgaste ni un ritmo de enfriamiento negativos. Para `h0` además: con `h0 ≤ 0` la ecuación térmica es inestable y `θ` se dispara |
+| libre | `kappa` | La única cuyo signo **no** está fijado por la física: hay análisis que sostiene que 2026 invirtió el orden de los compuestos |
+| caja con sigmoide | `gamma2` | La peor identificada: solo llega al observable con `d → 1`, y los equipos paran antes. La caja afirma algo que sí sabemos: un neumático destruido cuesta unos segundos por vuelta, no millones |
+
+## 4. Cómo correrlo
+
+```bash
 pip install -r requirements.txt
 ```
 
-DeepXDE needs to know its backend:
+### Primero: calibrar las constantes
+
+**Antes de entrenar nada.** Las constantes de `physics.py` describen el mundo que
+simula el banco sintético, y entrenar contra un mundo que no se comporta como un
+neumático no le enseña nada útil a la red.
 
 ```bash
-set DDE_BACKEND=pytorch
+python tune.py                                  # diagnostica lo que hay puesto
+python tune.py --Ea 2.8 --A_gen 2.1 --zeta 2.5  # prueba otros valores
+python tune.py --sweep zeta 0.5 4.0 8           # un mando, ocho valores
+python tune.py --plot outputs/tuning.png        # mira la forma, no solo las cifras
+python tune.py --check-integrator               # valida RK4
 ```
 
----
+No entrena nada y tarda segundos. Lo último que imprime es el bloque exacto para
+pegar en `TireParams`. **El manual completo está en [TUNING.md](TUNING.md).**
 
-## 4. Usage
-
-Train on the synthetic bench (needs no network access and no API):
+### Con datos sintéticos
 
 ```bash
-python run_train.py --source synthetic --stints 64
+python run.py                     # 48 stints, 8 000 iteraciones, ~1 min en CPU
+python run.py --quick             # versión corta para comprobar que arranca
+python run.py --width 96 --layers 5 --iterations 15000   # red más grande
+
+python run.py --w-thermal 0.02    # reequilibra la pérdida (ver más abajo)
+python run.py --lbfgs 400         # fase de refinado tras Adam
+python run.py --ic soft           # la formulación de libro de texto, para comparar
 ```
 
-Quick pipeline check (about 2 minutes):
+### Con datos reales
+
+Primero se descargan, y quedan en un CSV que puedes abrir en Excel:
 
 ```bash
-python run_train.py --source synthetic --quick
+# Una carrera
+python download_data.py --year 2023 --races Monza --out data/monza.csv
+
+# Varias, que es lo recomendable: con una sola, las condiciones apenas varían
+python download_data.py --year 2023 \
+    --races Monza Hungary Spa Silverstone \
+    --out data/2023.csv
+
+# Prueba rápida sin telemetría: segundos en vez de minutos
+python download_data.py --year 2023 --races Monza --no-telemetry \
+    --out data/quick.csv
 ```
 
-Train on real telemetry. **Use several races**: within a single one the context
-variables barely move (same circuit, same weather), so the network only really
-sees the effect of compound and time.
+Y después se entrena con ellos:
 
 ```bash
-python run_train.py --source fastf1 --year 2023 --gp Monza Hungary Bahrain Spain
+python run.py --source csv --csv data/2023.csv
+
+# Solo con algunos pilotos (mayúsculas o minúsculas, da igual)
+python run.py --source csv --csv data/2023.csv --drivers VER HAM
 ```
 
-Inference and latency measurement with a trained model:
+**`--drivers` está en los dos programas y no hace lo mismo.** En
+`download_data.py` filtra lo que se descarga; en `run.py`, con qué se entrena.
+Para comparar pilotos, descarga a todos una vez y filtra al entrenar: probar otro
+piloto no cuesta otra descarga. Un código que no está en el CSV es un error que
+lista los que sí están, no algo que se ignore en silencio.
 
-```bash
-python run_infer.py --compound SOFT --track-temp 0.8 --load 1.2
+Menos pilotos son menos stints. Un piloto en una carrera suele dar dos o tres, y
+hacen falta al menos dos (uno para entrenar, otro para evaluar); con tan pocos,
+el test es un solo stint y las cifras bailan de una semilla a otra. Para un
+piloto, junta varias carreras. Y si entrenas a VER y a HAM por separado y
+comparas las constantes, la diferencia mezcla piloto **y** coche.
+
+`python download_data.py --explain-columns` explica de dónde sale cada columna
+del CSV, y `--help` lista todas las opciones.
+
+> **La primera descarga tarda.** Parsear la telemetría de una carrera lleva
+> varios minutos, porque se baja y se deriva la de cada vuelta por separado.
+> FastF1 cachea lo descargado en `cache/` (unos 200 MB), así que la segunda vez
+> es mucho más rápida.
+
+### Qué hace el descargador, y por qué
+
+El problema de fondo es que **nada de lo que el modelo necesita es observable**.
+La temperatura interna del neumático, la carga vertical y el estado de la banda
+son datos propios de cada equipo. Lo público es la telemetría de a bordo y los
+tiempos por vuelta. Así que las variables se reconstruyen:
+
+- **`q_fric`** integrando `|a|·v` a lo largo de la vuelta.
+- **`load`** como aceleración total media, en g.
+- **La aceleración lateral no viene en la telemetría**: se reconstruye derivando
+  dos veces la trayectoria GPS. Como eso amplifica el ruido, antes se suaviza con
+  un filtro Savitzky-Golay cuya ventana se fija **en segundos y no en muestras**,
+  porque FastF1 fusiona fuentes a 10 Hz y 4 Hz y la frecuencia efectiva cambia
+  de una vuelta a otra.
+
+Y hay dos correcciones sin las cuales los datos no sirven:
+
+- **Combustible y evolución de pista.** El coche se hace más rápido a lo largo
+  de la carrera por motivos que no son el neumático, y sin corregirlo eso tapa
+  la degradación entera. Las dos causas no son separables entre sí, pero su
+  suma sí se puede estimar: el script ajusta una pendiente por carrera
+  controlando por piloto y por degradación. `--race-lap-effect` permite fijarla a
+  mano.
+- **El origen de la degradación es el pico, no la primera vuelta.** Un juego
+  nuevo sale frío y se hace *más rápido* dos o tres vueltas antes de empezar a
+  caer. El modelo es monótono por construcción y no puede representar eso, así
+  que esas vueltas se descartan y `d = 0` se define en el pico. En `main` esta
+  corrección llevó el RMSE de 2,82 s a 0,567 s.
+
+## 5. Resultados
+
+**Advertencia antes de la primera tabla:** estos números salen de las constantes
+**sin calibrar** que vienen en `physics.py`. Describen un mundo concreto y
+arbitrario. Están aquí para enseñar qué hace la maquinaria, no como una marca a
+batir — cuando calibres, los tuyos serán otros.
+
+### Por defecto: 48 stints, 8 000 iteraciones de Adam, ~2 min de CPU
+
+```
+python run.py
 ```
 
-### Outputs in `outputs/`
-
-| File | Contents |
-|---|---|
-| `01_stints.png` | predicted vs observed curves, test stints |
-| `02_extrapolation.png` | behaviour beyond the data: PINN vs black box |
-| `03_latent_states.png` | `θ` and `d` reconstructed vs synthetic ground truth |
-| `04_parameters.png` | inverse-problem convergence |
-| `05_loss.png` | evolution of each loss term |
-| `06_cliff_map.png` | decision map: lap at `d_crit` by compound and conditions |
-| `report.txt` | metrics table and parameter recovery |
-| `pinn_weights.pt`, `pinn_params.json` | trained model, ready for inference |
-
----
-
-## 5. The synthetic bench
-
-`data_synthetic.py` integrates (E1)–(E2) with **known** parameters
-(`physics.GROUND_TRUTH`) and adds measurement noise. It serves two purposes:
-
-1. The pipeline runs without depending on the network or on FastF1.
-2. **It validates the inverse problem**: the PINN starts from deliberately wrong
-   initial values and must *recover* the true ones using only the observed pace
-   loss. With real data that check is impossible — there is no ground truth.
-
-The generator imitates a strategist's decision: the stint is cut **two to five
-laps after** the cliff. No team runs a destroyed tire, but no team stops at the
-exact instant either — they lose laps deciding, waiting for a pit window, or
-covering a rival.
-
-That margin matters more than it looks. Those are the only laps that carry
-information about the `d → 1` regime, which is what `γ₂` and the scale of `k_w`
-depend on. Cutting the stint exactly at the cliff gave a mean parameter-recovery
-error of **11.8 %** (`γ₂` off by 62 %); leaving those few extra laps brings it
-down to **2.1 %** (`γ₂` off by 4.7 %).
-
----
-
-## 6. Real data: what is observable and what is not
-
-**Nothing the model needs is directly observable.** Internal temperature,
-vertical load and tread state are proprietary to each team. What is public is
-onboard telemetry and lap timing. `data_fastf1.py` bridges that gap:
-
-- **`q_fric`** — specific frictional power, integrating `|a|·v` over the lap. This
-  is the heat-generation term of (E1).
-- **`load`** — mean total acceleration in g. This is the Archard term of (E2).
-- **`speed`** — mean speed, which governs convective cooling.
-
-**Lateral acceleration is not in the telemetry**: it is reconstructed by
-differentiating the GPS trajectory twice, with Savitzky-Golay smoothing first
-because numerical second derivatives amplify sampling noise.
-
-The degradation observable is pace loss **corrected for fuel**: a car sheds
-~100 kg over a race and that is worth more than a second a lap. Uncorrected, the
-weight loss completely masks degradation.
-
-Quality filters applied: green flag only (`TrackStatus == 1`), no in/out laps,
-`IsAccurate` only, no deleted laps, and fresh sets only (`FreshTyre`) — because
-`d(0) = 0` only holds for a new tire.
-
-The proxies are made dimensionless against **fixed references** (`q_fric_ref`,
-`load_ref`, `speed_ref` in `DataConfig`), not against each session's median.
-Normalising each race against itself would put both Monza and Hungary at 1.0 and
-erase precisely the between-circuit variation the model needs. The constants are
-calibrated from 2023 races (Monza 1877 W/kg · 3.39 g · 66.4 m/s; Hungary 1968 ·
-4.35 · 51.6).
-
-### The degradation origin is the peak, not the first lap
-
-A new set comes out cold and gets *faster* for two or three laps before it starts
-falling away. The model is monotone by construction and cannot represent that
-warm-up phase. The fix is to anchor `d = 0` at the **performance peak** of the
-stint and discard the laps before it.
-
-This is not cosmetic. Without that anchoring every stint starts ~0.5 s
-systematically offset between what is observed and what the model can predict,
-and the network absorbs the conflict by degenerating the physical parameters: in
-a test on Monza + Hungary, `E_a` collapsed to 0.03 (no thermal activation), `m`
-to 0.13 (no load dependence) and `γ₂` blew up to 8.35. Fixing the anchoring
-dropped PINN RMSE from **2.82 s to 0.57 s** and monotonicity violations from
-**16.4 % to 0 %**.
-
-### Known limitations with real data
-
-- **Constant context per stint.** The model assumes `q`, `λ`, `v` are constant
-  within a stint and uses their median. Lap-to-lap variation is absorbed by the
-  data residual. This is the simplification that makes the parametric operator
-  tractable.
-- **`load` is a relative proxy, not a measurement.** It comes from
-  double-differentiating GPS, and its absolute magnitude (≈3–4 g mean) sits above
-  what a real accelerometer would read. What matters is that it is monotone in
-  true load and discriminates between circuits, and both hold; the absolute value
-  cancels when dividing by `load_ref`.
-- **Track evolution.** The circuit rubbers in and gets faster during the race.
-  That effect is not separated from degradation and biases the estimated slope.
-- **Traffic and dirty air** are mitigated by the `max_delta_s` filter, not
-  eliminated.
-- **`γ₂` is weakly identified.** It only comes into play as `d → 1`, and teams pit
-  before that, so there is little data in that regime. That is a real limitation
-  of the problem, not of the method: the information about the final collapse
-  simply is not in race data.
-- **`k_w` and `γ₁` partially compensate.** `δ ≈ γ₁·d` and `d` scales with `k_w`,
-  so underestimating one and overestimating the other leaves the pace curve almost
-  identical. What breaks the degeneracy is the `(1−d)` saturation: once a stint
-  approaches `d = 1`, the scale of `d` is pinned. Another reason long stints are
-  valuable.
-
----
-
-## 7. Results
-
-Synthetic bench, 64 stints (48 train / 16 test, split by stint), 15 000 Adam
-iterations + 3 000 L-BFGS, ~30 min on CPU:
-
-| Model | RMSE [s] | MAE [s] | MaxErr [s] | Cliff MAE | Cliffs found | Viol. interp. | Viol. extrap. |
-|---|---|---|---|---|---|---|---|
-| **PINN** | **0.063** | **0.050** | **0.189** | n/a | 0/0 | **0.0 %** | **1.1 %** |
-| Linear (classic) | 0.246 | 0.159 | 0.913 | n/a | 0/0 | 22.7 % | 22.2 % |
-| LSTM (black box) | 0.070 | 0.057 | 0.219 | n/a | 0/0 | 0.8 % | 1.1 % |
-
-The PINN is the most accurate and the most physically consistent: 0 % violations
-inside the observed range against the linear model's 22.7 %.
-
-> **The cliff columns are empty, and that is a finding rather than a gap.** Under
-> a noise-robust definition of a cliff (0.30 s/lap sustained for 4 laps, see
-> below), no stint in this bench qualifies. The earlier version of this table
-> reported "Cliff MAE 0.50, 2/2 detected" using a 0.15 s/lap single-point test —
-> that test turned out to fire on **100 %** of cliff-free curves once realistic
-> timing noise is present. Those numbers were measuring noise. See
-> [section 8](#8-verification-against-published-degradation-data).
-
-![Per-stint prediction](outputs/01_stints.png)
-
-*Degradation curves on the test set. The PINN and the LSTM both track the points
-well; the linear model drifts systematically — in `SYN007` it even crosses into
-negative values.*
-
-### Latent states: what the network reconstructs without ever seeing it
-
-![Latent states](outputs/03_latent_states.png)
-
-*Conceptually the most important figure. `d` (bottom row) is the fraction of
-tread consumed and **never appears in the training data** — the network only sees
-lap times. The red curve landing on the black points means the network
-reconstructed wear **purely because we forced it to satisfy the differential
-equation**. A network without physics has no way to recover a state it never
-observes.*
-
-### Physical parameter recovery
-
-![Parameter convergence](outputs/04_parameters.png)
-
-*All nine physical constants converge to their true value (dashed black line)
-starting from deliberately wrong initial values. Note the jump in `zeta`, `h0`
-and `h1` past iteration 15 000: that is L-BFGS taking over.*
-
-The PINN starts from deliberately different initial values and recovers the true
-ones using **only the observed pace loss**:
-
-| Parameter | Estimated | True | Error |
-|---|---|---|---|
-| `ζ` (cliff coupling) | 0.893 | 0.900 | 0.7 % |
-| `h₀` (base cooling) | 5.968 | 6.000 | 0.5 % |
-| `h₁` (forced convection) | 3.998 | 4.000 | 0.0 % |
-| `k_w` (wear rate) | 0.565 | 0.550 | 2.6 % |
-| `m` (load exponent) | 1.494 | 1.500 | 0.4 % |
-| `E_a` (thermal activation) | 0.930 | 0.950 | 2.1 % |
-| `κ` (compound hardness) | 0.852 | 0.850 | 0.2 % |
-| `γ₁` (linear pace loss) | 1.350 | 1.350 | 0.0 % |
-| `γ₂` (cliff magnitude) | 2.738 | 2.600 | 5.3 % |
-| | | **mean** | **1.3 %** |
-
-In `04_parameters.png` you can see that `ζ`, `h₀` and `h₁` stall through all
-15 000 Adam iterations and only jump to their true value during the L-BFGS phase.
-The thermal parameters are the worst-conditioned in the problem — they only reach
-`δ` through two layers of composition — and need a second-order optimiser. That
-is the concrete reason the Adam → L-BFGS regime is not optional here.
-
-### On real telemetry (Monza + Hungary 2023, 36 stints)
-
-Here the result is **worse**, and it is worth saying so plainly:
-
-| Model | RMSE [s] | MAE [s] | Cliffs found | Viol. interp. | Viol. extrap. |
-|---|---|---|---|---|---|
-| PINN | 1.172 | 0.725 | 0/0 | 6.3 % | 6.3 % |
-| Linear (classic) | **0.539** | **0.429** | 0/0 | 0.0 % | 0.0 % |
-| LSTM (black box) | 0.536 | 0.423 | 0/0 | 0.6 % | 8.8 % |
-
-**The PINN does not beat the baselines on two races.** With 36 stints, a ~0.5 s
-per lap noise floor and very little variation in conditions, the observed
-degradation curve is close to linear over the measured range — and a linear fit
-is hard to beat there. The PINN pays the price of being constrained without yet
-being able to collect the benefit.
-
-The fitted parameters are physically reasonable (`k_w = 0.813`, `κ = 0.968`) and
-neither is pinned against a bound, which was the symptom of the degeneracy. But
-the wear-ODE residual settles around 0.15 — two orders of magnitude worse than on
-the synthetic bench — and that is where the remaining monotonicity violations
-come from.
-
-These figures reproduce exactly across repeated runs, as do the synthetic ones.
-
-The honest conclusion is that **the real-data path is mechanically validated but
-not scientifically validated**: it runs end to end and produces interpretable
-parameters, but it needs considerably more races before the physics starts paying
-off. That is the natural continuation of this work.
-
-### The end product: the decision map
-
-![Cliff decision map](outputs/06_cliff_map.png)
-
-*Lap at which the tire passes `d_crit` = 0.85, as a function of compound, track
-temperature and mechanical load. Red = wears out early; grey = survives the full
-45-lap horizon. The ordering is physically right: SOFT wears out first, HARD
-last, and hotter tracks with higher load bring the limit forward.*
-
-*The criterion here is the latent wear state `d`, not the slope of the pace
-curve. For the model's own predictions `d` is available directly, so there is no
-reason to re-infer a knee from a differentiated curve — and the noise-robust
-slope threshold is strict enough that it would leave this map entirely empty.
-This map is 1 728 predictions and **is only possible because the network is
-parametric**: each cell is a forward pass, not a retrain.*
-
-### Inference latency
-
-Predicting a full 45-lap stint costs **0.42 ms on average, 1.47 ms at p95** (CPU,
-500 repetitions). The project's 500 ms budget is consumed entirely by transport,
-not by the model: the parametric network solves the ODE in a single forward pass.
-
----
-
-## 8. Verification against published degradation data
-
-The model was checked against an independent source: a public analysis of F1 tyre
-degradation reporting per-compound and per-circuit rates measured from race data
-([Yahoo Sports, 2026 season analysis](https://sports.yahoo.com/articles/f1-tyre-degradation-2026-data-112619253.html)).
-Its headline figures are 2026 rates — Hard 0.071, Medium 0.065, Soft 0.063 s/lap —
-plus per-season compound spreads and per-circuit rates.
-
-### What matched
-
-Degradation rate was measured the same way on this project's own dataset: a
-linear fit of fuel-corrected pace loss against stint lap.
-
-| Quantity | Published | Measured here | Δ |
-|---|---|---|---|
-| Compound spread, 2023 | 0.011 s/lap | 0.0102 s/lap (MEDIUM − HARD) | ~7 % |
-| Rate magnitude | 2026 circuits span 0.022 (China) → 0.097 (Austria) | Monza 0.096, Hungary 0.067 | inside range |
-| Track evolution can flip the sign | Montreal −0.005 s/lap | 1 of 36 stints has a negative slope | consistent |
-
-The model's own predicted rates land close to what was observed:
-
-| Compound | Model | Observed | Δ |
-|---|---|---|---|
-| MEDIUM | 0.0892 s/lap | 0.0916 s/lap | −2.6 % |
-| HARD | 0.0755 s/lap | 0.0814 s/lap | −7.2 % |
-
-The synthetic bench also turns out to be well calibrated in magnitude without
-having been tuned for it: a nominal MEDIUM stint degrades at **0.086 s/lap**
-against a real measured median of **0.090 s/lap**.
-
-The 2023 spread agreeing to ~7 % is the strongest single check, since it is a
-direct like-for-like comparison. Two caveats: the SOFT sample here is one stint,
-so the spread is MEDIUM vs HARD only, and two races cannot replicate a
-full-season figure.
-
-### What it exposed — three findings
-
-**1. The cliff detector was measuring noise.** The original criterion — pace-loss
-slope above 0.15 s/lap at any single point — fires on **100 %** of curves that
-contain no cliff at all, once realistic timing noise (σ ≈ 0.3–0.5 s) is present.
-That is not a marginal failure:
-
-| Noise σ [s] | 0.00 | 0.05 | 0.10 | 0.20 | 0.30 | 0.50 |
+| Modelo | RMSE | MAE | ErrorMax | ViolDentro | ViolExtrap | Cliff |
 |---|---|---|---|---|---|---|
-| False "cliff" detected | 0 % | 0.6 % | 45 % | 98 % | 100 % | 100 % |
+| **PINN** | **0,061** | **0,046** | **0,221** | **0,0 %** | **0,0 %** | 0 % |
+| Lineal clásico | 0,143 | 0,104 | 0,473 | **8,6 %** | **4,0 %** | 0 % |
 
-It explains a result that should have looked suspicious: 34 of 36 real stints
-"had a cliff" while their median degradation was a steady 0.09 s/lap. The
-criterion is now 0.30 s/lap **sustained over 4 consecutive laps**, which drops
-false positives to 0–1 % while still catching 96–100 % of genuine knees. Under
-it, real cliffs are rare: **2 of 36 stints**.
+*ViolDentro / ViolExtrap = % de vueltas en las que el modelo predice que el
+neumático recupera agarre. Es imposible; el valor correcto es 0 %.*
 
-**2. Cliffs are far rarer than the project's framing assumes.** The published
-analysis reports degradation as a single linear rate per compound and never
-quantifies a cliff. Measured here, the synthetic bench's own ground truth peaks
-at 0.086 s/lap for a nominal stint and only reaches 0.305 s/lap in the most
-extreme context. The grip collapse is real in the model, but as a *detectable
-event* it barely occurs in this era — which is why the cliff columns above are
-empty. The honest reading is that the model predicts **degradation curves** well;
-"cliff lap prediction" oversells what the data supports.
+**Aquí ya no empatan, y el motivo es interesante.** Con una sola EDO los dos
+modelos daban prácticamente el mismo RMSE, porque a lo largo de 12–30 vueltas la
+curva estaba suavemente doblada y una parábola ajusta muy bien una curva
+suavemente doblada. Con la realimentación térmica la curva **cambia de
+curvatura** dentro del stint, y la parábola ya no da: se le dispara el error
+máximo y empieza a predecir que el neumático recupera agarre en el 8,6 % de las
+vueltas. El PINN no lo hace nunca, y no por ajustar mejor: **tiene dentro una
+ecuación que se lo prohíbe**.
 
-**3. The compound term cannot represent 2026.** In 2026 the hierarchy is
-*reversed*: hard degrades fastest (0.071) and soft slowest (0.063). The wear law
-carries the compound as `exp(−κ·c)` with `c` = 0 for soft and 1 for hard, and `κ`
-is log-parametrised, so `κ > 0` always and **hard necessarily wears less than
-soft**. For 2023 that ordering is correct; for 2026 the model is structurally
-incapable of fitting the data. The fix is one line — drop the log parametrisation
-for `κ` so it may go negative — and it costs nothing, because unlike a cooling
-coefficient there is no physical reason for `κ` to be positive. It is not applied
-here because this project targets 2023 data.
+La columna `Cliff` está en 0 % para los dos, y es correcto: con `β = 0,71` las
+constantes puestas no producen ninguno. El PINN está reproduciendo fielmente un
+mundo sin acantilado.
 
----
+Recuperación de las diez constantes — **17,2 % de error medio**:
 
-## 9. The 2026 season
-
-The model was then run against a full modern season: **11 races of 2026, 432
-stints, 8 192 laps** (324 train / 108 test). Monaco is excluded — after the
-green-flag and pit-lap filters it yields no stint of 8 clean laps.
-
-This required one change. The wear law carries the compound as `exp(-κ·c)`, and
-`κ` was log-parametrised, so `κ > 0` always and a harder compound necessarily
-wore less. Published figures for 2026 claim the hierarchy inverted, which the
-model was structurally unable to express. `κ` now uses the bounded sigmoid
-parametrisation instead, over a symmetric `[-1.5, +1.5]`, so **its sign is
-decided by the data rather than by the parametrisation**.
-
-### The compound hierarchy: this data cannot resolve it
-
-Published analysis of 2026 reports that the hierarchy inverted — **the hard is
-now the compound degrading fastest** (0.071 s/lap, against 0.065 medium and
-0.063 soft). That is also the prevailing view in the paddock.
-
-This project's data can neither confirm nor refute it. Estimating degradation
-per circuit while controlling for driver and for the race-lap effect gives:
-
-| | HARD − MEDIUM |
-|---|---|
-| Mean across 11 circuits | −0.0061 s/lap |
-| Standard error | 0.0063 |
-| 95 % CI | **[−0.018, +0.006]** |
-| t | −0.96, not significant |
-| Circuits where hard degrades more | 5 of 11 |
-
-The confidence interval **contains the published +0.006**, so the claim is
-entirely compatible with this data. It also contains zero and the classic
-ordering. The reason nothing can be concluded is scale: the standard deviation
-of the effect across circuits is 0.021 s/lap, **three times the effect being
-looked for**. Eleven races are not enough to resolve a 0.006 s/lap difference
-against that much circuit-to-circuit variability.
-
-> **Correction to an earlier version of this document.** It previously reported
-> HARD − MEDIUM = −0.027 s/lap and concluded the classic ordering held clearly,
-> attributing the published inversion to a circuit confound. That number came
-> from an analysis that used the fixed 0.055 s/lap fuel correction — since shown
-> to be biased by up to ±0.8 s per stint, with different signs at different
-> circuits — and did not control for driver. Re-run with the estimated race-lap
-> effect and driver effects, the difference shrinks to −0.006 and loses
-> significance. The confound is real and worth controlling; the confident
-> conclusion drawn from it was not supported.
-
-
-**Where the claim comes from.** It traces to a single analysis
-([F1 Chronicle](https://f1chronicle.substack.com/p/f1-tyre-degradation-in-2026-the-data),
-syndicated by Yahoo Sports); no other independent source found reports it, and
-Pirelli's own 2026 press material describes the compound range's design
-philosophy without ever claiming an inversion in wear rates. By its own
-description the method **pools every stint per compound across races without
-controlling for circuit, driver or team**, reports no confidence intervals, and
-excludes Barcelona for anomalous degradation. It does test fuel-correction
-robustness across a global 0.03-0.08 s/lap range -- which rules out a *global*
-mis-specification, but not the per-circuit variation measured here (-0.026 at
-Miami to -0.097 at Spa), since a single constant biases circuits differently and
-compound usage correlates with circuit.
-
-None of that makes the claim wrong. It means neither analysis settles it: theirs
-reports no uncertainty, and this one's interval spans zero.
-
-The fitted `κ` follows the same story: it comes out positive but small, and its
-sign is now decided by the data rather than by the parametrisation.
-
-### Correcting for race lap: fuel burn and track evolution together
-
-Two things make a car faster as a race progresses — it burns off ~100 kg of fuel,
-and the circuit rubbers in. Setting out to model track evolution separately
-showed that **it cannot be done**: both are smooth monotone functions of race lap,
-so splitting them would invent a decomposition the data cannot support. What is
-estimable is their sum, and estimating it beats assuming a constant:
-
-| Circuit | Estimated | vs assumed −0.055 | Bias over a 20-lap stint |
-|---|---|---|---|
-| Spa | −0.097 | −0.042 | **+0.83 s** |
-| Melbourne | −0.063 | −0.008 | +0.16 s |
-| Shanghai | −0.056 | −0.001 | +0.01 s |
-| Zandvoort | −0.035 | +0.020 | −0.40 s |
-| Spielberg | −0.031 | +0.024 | −0.48 s |
-| Miami | −0.026 | +0.029 | **−0.57 s** |
-
-The bias runs from −0.57 s to +0.83 s depending on circuit — comparable to the
-entire degradation signal, and with different signs, so it does not cancel. It
-distorts precisely the circuit-to-degradation relationship the model is trying to
-learn. Spa being the extreme makes physical sense: it has the longest lap on the
-calendar, so more fuel burns per lap. A fixed s/lap figure cannot know that.
-
-Identification comes from cars carrying different tire ages at the same race lap,
-because they pit at different times — measured spread of 2–7 laps, correlation
-with race lap of only 0.22–0.76. The fit is
-`lap_time ~ driver + f(race_lap) + degradation(age, compound)`, with `f` a
-piecewise-linear spline so its shape is measured rather than assumed.
-
-### The context proxies were mostly noise
-
-The 2026 decision map came out physically incoherent — not monotone in load or
-temperature — which said the network had not learned a trustworthy mapping from
-conditions to degradation. Decomposing the variance of the context proxies shows
-why:
-
-| Proxy | Variance **within** a circuit |
-|---|---|
-| `q_fric` | **53 %** |
-| `load` | **61 %** |
-| `speed` | 7 % |
-| `track_temp` | 1 % |
-
-More than half the variation in the two proxies that feed the physics terms
-happens between stints at the *same* circuit. The decisive test is whether that
-variation predicts anything — correlating each proxy's within-circuit deviation
-against the within-circuit deviation of measured degradation:
-
-| Proxy | r between circuits | r within a circuit |
-|---|---|---|
-| `q_fric` | 0.248 | **0.001** |
-| `load` | 0.201 | **0.029** |
-| `speed` | −0.054 | −0.203 |
-| `track_temp` | **0.664** | 0.041 |
-
-With n = 423 the 5 % critical value is ±0.095. So the within-circuit variation of
-`q_fric` and `load` **predicts nothing at all** — it is measurement noise from
-double-differentiated GPS. Between circuits the same proxies do carry signal, and
-`track_temp` between circuits is the strongest predictor available.
-
-Collapsing `q_fric` and `load` to their per-race median therefore discards noise
-and keeps signal. `speed` is deliberately left alone: its within-circuit
-deviation *is* predictive (r = −0.203, significant, and with the physically right
-sign — more speed, more cooling, less wear), so averaging it would throw away
-real information.
-
-### Final 2026 results
-
-| Model | RMSE [s] | MAE [s] | Viol. interp. | Viol. extrap. |
+| Constante | Estimado | Real | Error | |
 |---|---|---|---|---|
-| **PINN** | **0.694** | **0.494** | **2.7 %** | **5.7 %** |
-| Linear (classic) | 0.801 | 0.602 | 7.9 % | 26.0 % |
-| LSTM (black box) | 0.746 | 0.541 | 9.9 % | 11.2 % |
+| `kw` | 0,4292 | 0,4500 | 4,6 % | llega directa al observable |
+| `m` | 1,6128 | 1,5000 | 7,5 % | |
+| `Ea` | 0,8677 | 0,9500 | 8,7 % | |
+| `Eq` | 0,3914 | 0,4000 | 2,2 % | |
+| `Ev` | 0,3287 | 0,3500 | 6,1 % | |
+| `kappa` | 0,8277 | 0,8500 | 2,6 % | |
+| `zeta` | 0,3740 | 0,9000 | **58,4 %** | solo llega a través de `θ` |
+| `h0` | 2,7857 | 4,0000 | **30,4 %** | idem |
+| `h1` | 1,2233 | 2,0000 | **38,8 %** | idem |
+| `gamma2` | 2,4819 | 2,2000 | 12,8 % | solo actúa con `d → 1` |
 
-An oracle fitting a separate straight line to each *test* stint scores 0.531 s.
+![Los estados latentes](outputs/04_state.png)
 
-**With the noise removed the PINN wins on every metric**, and it is the first
-time it does so on real data. Removing the context noise moved it from 0.928 to
-0.694 RMSE, a 25 % improvement, while the baselines barely moved (0.817 → 0.801
-and 0.748 → 0.746).
+*Arriba `θ`, abajo `d`. Ninguna de las dos se mide jamás.*
 
-That asymmetry is the point, and it is mechanistic rather than lucky. The
-baselines use the context only as regression features, where noise attenuates a
-coefficient and little else. The PINN *imposes physics as a function of the
-context*, evaluating the ODE residual at collocation points spread across the
-whole context hypercube — so noisy context coordinates corrupt the constraint
-everywhere, not only where there is data. **The more a model leans on its inputs,
-the more it is hurt by noise in them.**
+**Esa figura es el diagnóstico, y conviene mirarla antes que el RMSE.** `d` está
+recuperada casi perfectamente en los tres compuestos —el rojo tapa al azul— pero
+`θ` sale sistemáticamente **alta**. Es la firma visual de lo que dice la tabla:
+la red acierta los segundos compensando con `zeta` y `h0` demasiado bajas, que
+producen una trayectoria de temperatura distinta pero un `d` correcto. En
+segundos el ajuste es excelente; por dentro, el neumático que el modelo imagina
+corre más caliente que el real.
 
-The decision map is coherent for the first time on real data: wear arrives
-earliest at high load and high track temperature, and soonest on the soft. The
-earlier incoherence was the symptom; this was the cause.
+Eso es exactamente lo que `04_state.png` existe para enseñar, y lo que ninguna
+métrica de error puede.
 
-The fitted `κ` drops to +0.031, essentially no compound effect — consistent with
-the finding above that a season cannot resolve one.
+El patrón es la mitad de la historia del proyecto: **las seis constantes del
+desgaste, que llegan directas al observable, se recuperan entre el 2 % y el 9 %.
+Las tres térmicas, que solo llegan a través de `θ`, están entre el 30 % y el
+58 %.** Son las peor condicionadas del sistema: mueven `θ`, `θ` mueve el ritmo de
+desgaste, el desgaste mueve `d`, y solo entonces pasa algo en segundos.
 
----
+### Las dos palancas que mueven eso, medidas
 
-## 10. Evaluation
+Con todo lo demás igual, 3 000 iteraciones:
 
-Three dimensions, because they answer different questions:
+| corrida | error medio | qué cambia |
+|---|---|---|
+| por defecto | 16,3 % | `zeta` 52,9 %, `h1` 34,4 % |
+| `--w-thermal 0.02` | **13,2 %** | `Ea` 10,5 → 3,5 %, `gamma2` 18,3 → 2,8 % |
+| `--w-thermal 0.02 --lbfgs 400` | 14,6 % | `h1` 34,4 → **3,8 %**, `kw` → 0,1 %, pero `Ev` 2,4 → 22 % |
 
-- **RMSE / MAE** on pace loss: how wrong the model is on the lap it is looking at.
-- **Cliff lap error**: how wrong it is on the one prediction that changes a
-  strategy decision. A model can have a good global RMSE and still miss the cliff
-  by five laps.
-- **Monotonicity violations**: how often it predicts the tire *regaining* grip.
-  That is physically impossible and no error metric penalises it, so it is
-  measured separately. The correct value is 0 %.
+`--w-thermal` existe porque los dos residuos no viven en la misma escala: en la
+primera iteración de una corrida real, `wear 0.03279` contra `heat 55.48579`. El
+térmico nace **1700 veces más grande**, así que con el peso por defecto la red
+dedica casi todo su esfuerzo a la ecuación que no tiene ni un dato que la sujete.
 
-The baselines are the two ends of the state of the art described in the project:
-`LinearDegBaseline` (the empirical model teams use, generously extended with a
-quadratic term and lap-context interactions so it is not a straw man) and
-`LSTMBaseline` (the recurrent black box).
+`--lbfgs` existe porque Adam, que escala cada parámetro por su propio historial
+de gradiente, tiende a dejar las térmicas donde empezaron. Un método
+cuasi-Newton usa la curvatura y sí las mueve. No es gratis: en la misma corrida
+`Ev` empeoró.
 
-The split is **by whole stint**, never by lap: splitting by lap would leak
-information from the same stint between train and test.
+### Pero la palanca grande no es de entrenamiento, es de física
 
----
+`zeta` sigue clavada cerca de su valor inicial en las tres corridas de arriba. No
+es el optimizador:
 
-## 11. Structure
+| | β = 0,71 (lo que viene puesto) | β = 1,94 |
+|---|---|---|
+| Subir `zeta` un 50 % mueve la curva de ritmo, como mucho | **0,469 s** | **1,445 s** |
+| `zeta` aprendida (arranca en 0,50) | 0,350 → error **61 %** | 1,677 → error **24 %** |
+| Error medio de las diez | 14,6 % | **8,6 %** |
+
+Con `β` por debajo de 1 la realimentación apenas deja huella en lo único que se
+mide, así que **no hay gradiente que seguir**. Los tres ajustes de entrenamiento
+mueven la media unos pocos puntos; un ajuste de física la mueve casi el doble.
+
+> **La lección que generaliza:** una constante solo es estimable si los datos
+> cubren el régimen donde esa constante tiene efecto, y con una amplitud que
+> destaque sobre el ruido. Calibrar la física no es cosmética — decide si el
+> problema inverso tiene solución. Es el mismo problema que en `main` obligó a
+> fijar siete de los nueve parámetros cuando se entrena con telemetría real.
+
+### Y una comprobación que no depende de nada de lo anterior
 
 ```
-src/tirepinn/
-  config.py          physical, network and data hyperparameters
-  physics.py         the ODE system, RK4 integrator, cliff detection
-  pinn.py            the parametric PINN (DeepXDE)
-  dataset.py         Stint / StintDataset, splitting, domain bounds
-  data_synthetic.py  test bench with known ground truth
-  data_fastf1.py     real telemetry and feature engineering
-  baselines.py       classic linear and LSTM
-  evaluate.py        metrics
-  plots.py           figures
-run_train.py         training + comparison + figures
-run_infer.py         inference and latency
+python tune.py --check-integrator
 ```
 
-A full walkthrough of the reasoning, the modelling choices and the four
-substantive problems found during development is in
-[DOCUMENTACION.md](DOCUMENTACION.md) *(in Spanish)*.
+Poniendo `A_gen = 0` el acoplamiento se apaga y el sistema vuelve a la única
+ecuación con forma cerrada. RK4 coincide con ella con un error de
+**3,05 × 10⁻¹²**. Si eso falla, todo lo demás está midiendo ruido.
 
----
+## 6. Lo que esta versión NO hace
 
-## 12. References
+Está escrito para que se vea el hueco, no para disimularlo:
 
-- Raissi, Perdikaris & Karniadakis (2019). *Physics-informed neural networks*.
-  Journal of Computational Physics, 378, 686–707.
-- Lu, Meng, Mao & Karniadakis (2021). *DeepXDE: A deep learning library for
-  solving differential equations*. SIAM Review, 63(1), 208–228.
-- Archard, J.F. (1953). *Contact and rubbing of flat surfaces*.
-- Oehrly, M. *FastF1: A Python package for F1 telemetry and timing data*.
-- [F1 tyre degradation 2026 data](https://sports.yahoo.com/articles/f1-tyre-degradation-2026-data-112619253.html)
-  — the independent figures used in section 8.
+- **Las constantes no están calibradas.** Es lo primero y es deliberado: las
+  ecuaciones son la entrega, los valores son tuyos. `python tune.py` te lo dice
+  en la primera línea, y [TUNING.md](TUNING.md) es el manual.
+- **Las tres constantes térmicas se recuperan mal** (30–58 % con las constantes
+  actuales). Parte es condicionamiento y se ataca con `--lbfgs`; parte es que
+  `β < 1` las hace casi invisibles, y eso solo se arregla calibrando.
+- **`gamma2` está débilmente identificada por construcción.** Solo entra en juego
+  con `d → 1` y los equipos paran antes. Es una limitación del problema, no del
+  método.
+- **La corrección de vuelta de carrera es una recta.** `main` ajusta un spline
+  lineal a trozos, porque la forma de esa curva no tiene por qué ser lineal.
+- **Sin baseline LSTM.** Aquí solo compite el modelo lineal clásico.
+- **Sin datos reales de verdad probados de punta a punta.** El descargador está
+  escrito y probado offline, pero los servidores de datos de F1 están bloqueados
+  por la política de red del entorno donde se desarrolló, así que la llamada real
+  a la API no se ha podido ejercitar.
