@@ -69,7 +69,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import INPUT_DIM, LEARNABLE_PARAMS, OUTPUT_DIM, Config
-from .dataset import StintDataset, input_bounds
+from .dataset import StintDataset, input_bounds, input_matrix
 from .physics import (
     TireParams,
     pace_loss,
@@ -77,9 +77,6 @@ from .physics import (
     wear_lap,
     wear_rate,
 )
-
-# Re-exported for convenience: the canonical order of the physical parameters.
-LEARNABLE = LEARNABLE_PARAMS
 
 
 def _to_raw(name: str, value: float, cfg) -> float:
@@ -123,7 +120,9 @@ class TirePINN:
         self.net: dde.nn.NN | None = None
         self.loss_history = None
         self.var_history: list[tuple[int, dict[str, float]]] = []
-        self._log_vars: dict[str, torch.Tensor] = {}
+        # Free physical parameters, as the unconstrained variables the optimiser
+        # moves (see `_to_raw`), and the rest at their fixed physical value.
+        self._raw_vars: dict[str, torch.Tensor] = {}
         self._fixed: dict[str, float] = {}
         self._bounds: tuple[list[float], list[float]] | None = None
         self._has_theta_obs = False
@@ -131,28 +130,32 @@ class TirePINN:
     # ------------------------------------------------------------------
     # Learnable physical parameters
     # ------------------------------------------------------------------
-    def _param_inits(self) -> dict[str, float]:
+    def _initial_values(self) -> dict[str, float]:
         """Starting value of every physical parameter, free or fixed."""
         phys = self.cfg.physics
-        inits = {name: float(getattr(phys, f"{name}_init")) for name in LEARNABLE}
-        if phys.train_A_gen:
-            inits["A_gen"] = phys.A_gen
-        return inits
+        values = {name: float(getattr(phys, f"{name}_init")) for name in LEARNABLE_PARAMS}
+        values["A_gen"] = phys.A_gen
+        return values
+
+    def _free_names(self) -> set[str]:
+        free = set(self.cfg.pinn.free_params)
+        if self.cfg.physics.train_A_gen:
+            free.add("A_gen")
+        return free
 
     def _init_variables(self) -> None:
         """Create the trainable variables; every other parameter stays fixed."""
         phys = self.cfg.physics
-        free = set(self.cfg.pinn.free_params) | ({"A_gen"} if phys.train_A_gen else set())
-        inits = self._param_inits()
-
-        self._log_vars = {
-            k: dde.Variable(_to_raw(k, v, phys)) for k, v in inits.items() if k in free
+        free = self._free_names()
+        values = self._initial_values()
+        self._raw_vars = {
+            k: dde.Variable(_to_raw(k, v, phys)) for k, v in values.items() if k in free
         }
-        self._fixed = {k: v for k, v in inits.items() if k not in free}
+        self._fixed = {k: v for k, v in values.items() if k not in free}
 
     @property
     def trainable_variables(self) -> list[torch.Tensor]:
-        return list(self._log_vars.values())
+        return list(self._raw_vars.values())
 
     def _dtype(self):
         """Numeric type the network expects.
@@ -162,45 +165,27 @@ class TirePINN:
         """
         return np.float64 if self.cfg.pinn.float64 else np.float32
 
+    def _physical_values(self, differentiable: bool) -> dict:
+        """Current value of every physical parameter, free or fixed.
+
+        Free parameters are mapped back from their raw variable: as tensors that
+        stay in the autograd graph when `differentiable`, as floats otherwise.
+        """
+        phys = self.cfg.physics
+        values = dict(self._fixed)
+        for name, raw in self._raw_vars.items():
+            values[name] = _from_raw(name, raw if differentiable else raw.item(), phys)
+        return values
+
     def _params_tensor(self) -> TireParams:
         """Parameters as torch tensors, for the autograd graph."""
-        phys = self.cfg.physics
-        get = lambda k: (  # noqa: E731
-            _from_raw(k, self._log_vars[k], phys) if k in self._log_vars else self._fixed[k]
-        )
-        a_gen = get("A_gen") if "A_gen" in self._log_vars else phys.A_gen
-        return TireParams(
-            A_gen=a_gen,
-            zeta=get("zeta"),
-            h0=get("h0"),
-            h1=get("h1"),
-            kw=get("kw"),
-            m=get("m"),
-            Ea=get("Ea"),
-            kappa=get("kappa"),
-            gamma1=get("gamma1"),
-            gamma2=get("gamma2"),
-            p=phys.cliff_exponent,
-        )
+        values = self._physical_values(differentiable=True)
+        return TireParams(**values, p=self.cfg.physics.cliff_exponent)
 
     def learned_params(self) -> TireParams:
-        """Estimated parameters, as numpy scalars."""
-        phys = self.cfg.physics
-        vals = dict(self._fixed)
-        vals.update({k: _from_raw(k, v.item(), phys) for k, v in self._log_vars.items()})
-        return TireParams(
-            A_gen=vals.get("A_gen", phys.A_gen),
-            zeta=vals["zeta"],
-            h0=vals["h0"],
-            h1=vals["h1"],
-            kw=vals["kw"],
-            m=vals["m"],
-            Ea=vals["Ea"],
-            kappa=vals["kappa"],
-            gamma1=vals["gamma1"],
-            gamma2=vals["gamma2"],
-            p=phys.cliff_exponent,
-        )
+        """Estimated parameters, as plain floats."""
+        values = self._physical_values(differentiable=False)
+        return TireParams(**values, p=self.cfg.physics.cliff_exponent)
 
     # ------------------------------------------------------------------
     # Residuals and observables
@@ -357,7 +342,7 @@ class TirePINN:
         are mapped back into physical units.
         """
         phys = self.cfg.physics
-        names = list(self._log_vars)
+        names = list(self._raw_vars)
         history: list[tuple[int, dict[str, float]]] = []
         try:
             with open(path, encoding="utf-8") as fh:
@@ -398,11 +383,8 @@ class TirePINN:
 
     def predict_curve(self, context: np.ndarray, laps: np.ndarray) -> dict[str, np.ndarray]:
         """Full stint prediction: temperature, wear and pace."""
-        phys = self.cfg.physics
         laps = np.asarray(laps, dtype=float).ravel()
-        tau = (laps / phys.lap_ref).reshape(-1, 1)
-        ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))
-        theta, d = self.predict(np.hstack([tau, ctx]))
+        theta, d = self.predict(input_matrix(laps, context, self.cfg.physics))
         delta = pace_loss(d, self.learned_params())
         return {"laps": laps, "theta": theta, "d": d, "delta": delta}
 
@@ -423,14 +405,27 @@ class TirePINN:
         phys = self.cfg.physics
         horizon = horizon or phys.strategy_horizon
         pred = self.predict_curve(context, np.arange(1, horizon + 1))
-        cliff = wear_lap(pred["laps"], pred["d"], phys)
-        rul = None if cliff is None else max(cliff - current_lap, 0.0)
+        limit = wear_lap(pred["laps"], pred["d"], phys)
+        rul = None if limit is None else max(limit - current_lap, 0.0)
         return {
-            "cliff_lap": cliff,
+            "wear_limit_lap": limit,
             "rul_laps": rul,
             "horizon": horizon,
             "curve": pred,
         }
+
+    @property
+    def domain(self) -> tuple[np.ndarray, np.ndarray]:
+        """Lower and upper corners of the input hypercube the ODE was enforced on."""
+        if self._bounds is None:
+            raise RuntimeError("The model is neither built nor loaded")
+        lows, highs = self._bounds
+        return np.asarray(lows, dtype=float), np.asarray(highs, dtype=float)
+
+    @property
+    def max_trained_lap(self) -> float:
+        """Longest stint lap covered by the training domain: beyond it the model extrapolates."""
+        return float(self.domain[1][0] * self.cfg.physics.lap_ref)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -451,18 +446,27 @@ class TirePINN:
             json.dump(payload, fh, indent=2)
 
     @classmethod
-    def load(cls, out_dir: str | Path, cfg: Config) -> TirePINN:
-        """Rebuild the network for inference (no training data required)."""
+    def load(cls, out_dir: str | Path, cfg: Config | None = None) -> TirePINN:
+        """Rebuild the network for inference (no training data required).
+
+        Without `cfg`, the `config.json` saved next to the weights is used, so the
+        model runs with exactly the settings it was trained with.
+        """
         out_dir = Path(out_dir)
+        if cfg is None:
+            saved = out_dir / "config.json"
+            cfg = Config.from_json(saved) if saved.exists() else Config()
         with open(out_dir / "pinn_params.json", encoding="utf-8") as fh:
             payload = json.load(fh)
 
         obj = cls(cfg)
         obj._init_variables()
         for name, value in payload["params"].items():
-            if name in obj._log_vars:
+            if name in obj._raw_vars:
                 with torch.no_grad():
-                    obj._log_vars[name].fill_(_to_raw(name, value, cfg.physics))
+                    obj._raw_vars[name].fill_(_to_raw(name, value, cfg.physics))
+            elif name in obj._fixed:
+                obj._fixed[name] = float(value)
 
         layers = [INPUT_DIM, *payload["hidden"], OUTPUT_DIM]
         obj.net = dde.nn.FNN(layers, payload["activation"], cfg.pinn.initializer)

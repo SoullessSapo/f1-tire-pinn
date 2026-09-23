@@ -14,7 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .config import PhysicsConfig
+from .config import COMPOUND_INDEX, CONTEXT_NAMES, DRY_COMPOUNDS, PhysicsConfig
 from .dataset import StintDataset
 from .physics import cliff_lap, wear_lap
 
@@ -215,6 +215,17 @@ def plot_loss_history(losshistory, path: str | Path, labels: list[str] | None = 
     plt.close(fig)
 
 
+def _axis(lo: float, hi: float, res: int, min_span: float = 0.1) -> np.ndarray:
+    """`res` points from lo to hi, widened around the centre if narrower than `min_span`.
+
+    A model trained on a single race has an almost flat domain along some
+    context axes (the load, once collapsed to the race median), which would
+    otherwise draw as a sliver.
+    """
+    mid, half = (lo + hi) / 2.0, max((hi - lo) / 2.0, min_span / 2.0)
+    return np.linspace(mid - half, mid + half, res)
+
+
 def plot_cliff_map(
     pinn, phys: PhysicsConfig, path: str | Path, horizon: int | None = None, res: int = 24
 ) -> None:
@@ -228,12 +239,17 @@ def plot_cliff_map(
     need to infer a knee from a differentiated curve -- and the noise-robust
     slope threshold is so strict (by necessity, see `cliff_lap`) that it would
     leave this map almost entirely empty.
+
+    The axes span the track temperature and load the model was trained on (its
+    collocation domain); q_fric and speed are held at the centre of that domain.
     """
     _style()
     horizon = horizon or phys.strategy_horizon
-    compounds = [("SOFT", 0.0), ("MEDIUM", 0.5), ("HARD", 1.0)]
-    track = np.linspace(0.05, 0.95, res)
-    load = np.linspace(0.6, 1.4, res)
+    col = {name: 1 + i for i, name in enumerate(CONTEXT_NAMES)}  # column 0 is tau
+    lows, highs = pinn.domain
+    centre = (lows + highs) / 2.0
+    track = _axis(lows[col["track_temp"]], highs[col["track_temp"]], res)
+    load = _axis(lows[col["load"]], highs[col["load"]], res)
     laps = np.arange(1, horizon + 1, dtype=float)
     tau = laps / phys.lap_ref
 
@@ -241,22 +257,15 @@ def plot_cliff_map(
     n_cells = grid_load.size
 
     grids = []
-    for _, comp_idx in compounds:
-        contexts = np.stack(
-            [
-                np.ones(n_cells),
-                grid_load.ravel(),
-                np.ones(n_cells),
-                grid_track.ravel(),
-                np.full(n_cells, comp_idx),
-            ],
-            axis=1,
-        )
+    for compound in DRY_COMPOUNDS:
+        cell_inputs = np.tile(centre, (n_cells, 1))
+        cell_inputs[:, col["load"]] = grid_load.ravel()
+        cell_inputs[:, col["track_temp"]] = grid_track.ravel()
+        cell_inputs[:, col["compound"]] = COMPOUND_INDEX[compound]
         # Every cell in a single call: the network is parametric, so the whole
         # map costs one batched forward pass.
-        x = np.empty((n_cells * laps.size, contexts.shape[1] + 1))
+        x = np.repeat(cell_inputs, laps.size, axis=0)
         x[:, 0] = np.tile(tau, n_cells)
-        x[:, 1:] = np.repeat(contexts, laps.size, axis=0)
         _, d = pinn.predict(x)
         wear = d.reshape(n_cells, laps.size)
 
@@ -273,8 +282,8 @@ def plot_cliff_map(
     cmap = plt.get_cmap("RdYlGn").copy()
     cmap.set_bad("0.85")
 
-    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.6), squeeze=False)
-    for ax, (label, _), grid in zip(axes.ravel(), compounds, grids, strict=False):
+    fig, axes = plt.subplots(1, len(DRY_COMPOUNDS), figsize=(12.0, 3.6), squeeze=False)
+    for ax, label, grid in zip(axes.ravel(), DRY_COMPOUNDS, grids, strict=True):
         im = ax.imshow(
             np.ma.masked_invalid(grid),
             origin="lower",
@@ -293,7 +302,10 @@ def plot_cliff_map(
     fig.colorbar(im, ax=axes.ravel().tolist(), label="Lap at d_crit")
     fig.suptitle(
         f"Decision map: lap at which the tire passes d_crit = {phys.d_crit:g} "
-        f"(grey = not reached within {horizon} laps)"
+        f"(grey = not reached within {horizon} laps)\n"
+        f"q_fric = {centre[col['q_fric']]:.2f}, speed = {centre[col['speed']]:.2f} "
+        "(centre of the training domain)",
+        y=1.07,
     )
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)

@@ -89,14 +89,16 @@ def evaluate(
     extrapolation_horizon: int | None = None,
 ) -> Metrics:
     """Measure any model exposing `predict_stint(context, laps)`."""
-    extrapolation_horizon = extrapolation_horizon or phys.strategy_horizon
+    # Extrapolation: every model is also asked for the full stint out to the
+    # horizon, beyond what it saw. This is where physics shows.
+    horizon = np.arange(1, (extrapolation_horizon or phys.strategy_horizon) + 1)
+
     errors: list[np.ndarray] = []
     cliff_errors: list[float] = []
     per_stint: dict[str, float] = {}
-    viol, viol_total = 0, 0
-    ex_viol, ex_total = 0, 0
-    detected = 0
-    total_with_cliff = 0
+    violations_in, steps_in = 0, 0
+    violations_ex, steps_ex = 0, 0
+    cliffs_found, cliffs_real = 0, 0
 
     for stint in data.stints:
         pred = np.asarray(predict_stint(stint.context, stint.laps), dtype=float).ravel()
@@ -104,25 +106,22 @@ def evaluate(
         errors.append(err)
         per_stint[stint.stint_id] = float(np.sqrt(np.mean(err**2)))
 
-        v, t = _monotonicity_violation(pred)
-        viol += v
-        viol_total += t
+        v, n = _monotonicity_violation(pred)
+        violations_in += v
+        steps_in += n
 
-        # Extrapolation: the model is asked for the full stint out to the
-        # horizon, beyond what it saw. This is where physics shows.
-        horizon = np.arange(1, extrapolation_horizon + 1)
         pred_long = np.asarray(predict_stint(stint.context, horizon), dtype=float).ravel()
-        v, t = _monotonicity_violation(pred_long)
-        ex_viol += v
-        ex_total += t
+        v, n = _monotonicity_violation(pred_long)
+        violations_ex += v
+        steps_ex += n
 
         truth = _true_cliff(stint, phys)
         if truth is not None:
-            total_with_cliff += 1
-            got = cliff_lap(horizon, pred_long, phys)
-            if got is not None:
-                detected += 1
-                cliff_errors.append(abs(got - truth))
+            cliffs_real += 1
+            found = cliff_lap(horizon, pred_long, phys)
+            if found is not None:
+                cliffs_found += 1
+                cliff_errors.append(abs(found - truth))
 
     all_err = np.concatenate(errors)
     return Metrics(
@@ -131,10 +130,10 @@ def evaluate(
         mae=float(np.mean(np.abs(all_err))),
         max_error=float(np.max(np.abs(all_err))),
         cliff_mae=float(np.mean(cliff_errors)) if cliff_errors else None,
-        cliff_detected=detected,
-        cliff_total=total_with_cliff,
-        violation_rate=viol / viol_total if viol_total else 0.0,
-        extrap_violation_rate=ex_viol / ex_total if ex_total else 0.0,
+        cliff_detected=cliffs_found,
+        cliff_total=cliffs_real,
+        violation_rate=violations_in / steps_in if steps_in else 0.0,
+        extrap_violation_rate=violations_ex / steps_ex if steps_ex else 0.0,
         n_laps=int(all_err.size),
         per_stint=per_stint,
     )
@@ -155,6 +154,19 @@ def parameter_recovery(
         rel = 100.0 * abs(est - ref) / abs(ref) if ref else float("nan")
         rows.append((n, est, ref, rel))
     return rows
+
+
+def format_recovery(rows: list[tuple[str, float, float, float]]) -> str:
+    """Table of `parameter_recovery` rows, with the mean relative error."""
+    lines = [
+        "",
+        "Physical parameter recovery (inverse problem)",
+        f"{'Parameter':10s} {'Estimated':>10s} {'True':>10s} {'Rel. error':>11s}",
+        "-" * 45,
+    ]
+    lines += [f"{n:10s} {est:10.4f} {ref:10.4f} {rel:10.1f}%" for n, est, ref, rel in rows]
+    lines.append(f"{'':10s} {'':>10s} {'mean':>10s} {np.mean([r[3] for r in rows]):10.1f}%")
+    return "\n".join(lines)
 
 
 def format_report(metrics: list[Metrics]) -> str:

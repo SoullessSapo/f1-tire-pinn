@@ -22,8 +22,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from .config import PhysicsConfig
-from .dataset import StintDataset
+from .config import INPUT_DIM, PhysicsConfig
+from .dataset import StintDataset, input_matrix
 
 
 class LinearDegBaseline:
@@ -107,8 +107,7 @@ class LSTMBaseline:
     def _sequences(self, data: StintDataset) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Pack the stints into a padded tensor plus a validity mask."""
         max_len = max(s.n_laps for s in data.stints)
-        n_feat = 1 + data.stints[0].context.size
-        x = np.zeros((len(data.stints), max_len, n_feat), dtype=np.float32)
+        x = np.zeros((len(data.stints), max_len, INPUT_DIM), dtype=np.float32)
         y = np.zeros((len(data.stints), max_len), dtype=np.float32)
         mask = np.zeros((len(data.stints), max_len), dtype=np.float32)
         for i, stint in enumerate(data.stints):
@@ -138,9 +137,6 @@ class LSTMBaseline:
     def predict_stint(self, context: np.ndarray, laps: np.ndarray) -> np.ndarray:
         if self.net is None:
             raise RuntimeError("Fit the model before predicting")
-        laps = np.asarray(laps, dtype=float).ravel()
-        tau = (laps / self.phys.lap_ref).reshape(-1, 1)
-        ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))
-        seq = np.hstack([tau, ctx]).astype(np.float32)[None, ...]
+        seq = input_matrix(laps, context, self.phys).astype(np.float32)[None, ...]
         with torch.no_grad():
             return self.net(torch.from_numpy(seq)).numpy().ravel()

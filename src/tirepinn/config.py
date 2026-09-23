@@ -1,14 +1,22 @@
 """Central configuration.
 
 Every hyperparameter (physical, network and data) lives here so experiments are
-reproducible and the report can quote concrete values.
+reproducible and the report can quote concrete values. `Config.to_json` writes
+the full set next to each trained model and `Config.from_json` reads it back, so
+inference runs with exactly the settings the model was trained with.
+
+What does NOT live here is the description of a race: compound, tire age,
+weather and race distance come from the FastF1 API at run time, and so does the
+list of races unless one is given (see `data_fastf1`).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from datetime import date
+from pathlib import Path
 
 # Canonical order of the network input vector: (tau, context...)
 CONTEXT_NAMES = ("q_fric", "load", "speed", "track_temp", "compound")
@@ -41,7 +49,10 @@ LEARNABLE_PARAMS = ("zeta", "h0", "h1", "kw", "m", "Ea", "kappa", "gamma1", "gam
 # circuit or compound to another.
 REAL_DATA_FREE_PARAMS = ("kw", "kappa")
 
-# Compound hardness index: 0 = softest, 1 = hardest.
+# Compound hardness index: 0 = softest, 1 = hardest. The API reports only the
+# compound's name, so this mapping is the one piece of compound knowledge the
+# model carries itself. Laps on a compound missing from it are discarded, never
+# assigned a guessed hardness.
 COMPOUND_INDEX = {
     "HYPERSOFT": 0.0,
     "ULTRASOFT": 0.0,
@@ -52,6 +63,9 @@ COMPOUND_INDEX = {
     "INTERMEDIATE": 0.75,
     "WET": 1.0,
 }
+
+# The three dry compounds of a race weekend, softest first.
+DRY_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
 
 
 @dataclass(frozen=True)
@@ -82,7 +96,9 @@ class PhysicsConfig:
 
     # --- scales ---
     lap_ref: float = 30.0          # L_ref: laps per unit of tau
-    dT_ref: float = 40.0           # Delta T_ref [K], the temperature scale
+    # Delta T_ref [K]: the temperature scale of theta AND of the normalised track
+    # temperature, so that theta + T_trk in (E2) is a single temperature.
+    dT_ref: float = 40.0
     theta_init: float = 0.5        # theta(tau=0): leaving the pits off blankets
     d_max: float = 1.10            # admissible upper bound on degradation
 
@@ -201,10 +217,13 @@ class DataConfig:
     noise_theta: float = 0.05
 
     # --- FastF1 ---
-    year: int = 2023
-    gp: str = "Monza"
+    year: int = field(default_factory=lambda: date.today().year)
+    # Races to load, by any name FastF1 recognises ("Monza", "Italian Grand
+    # Prix"). Empty means every race of `year` already run, as listed by the
+    # API's event schedule.
+    races: tuple[str, ...] = ()
     session: str = "R"
-    drivers: tuple[str, ...] = ()
+    drivers: tuple[str, ...] = ()  # empty means every driver in the session
     cache_dir: str = "cache"
     # Correction for everything that changes lap time with race lap and is not
     # the tire: fuel burn plus track evolution. Estimating it per race beats
@@ -223,11 +242,22 @@ class DataConfig:
     q_fric_ref: float = 1900.0     # specific frictional power [W/kg]
     load_ref: float = 3.8          # mean mechanical load [g]
     speed_ref: float = 58.0        # mean speed [m/s]
+    # Track temperature enters the model as (T - track_temp_ref_c) / dT_ref,
+    # clipped to [0, 1]: 20-60 C with the default scales.
+    track_temp_ref_c: float = 20.0
 
     min_stint_laps: int = 8
     ref_window: int = 3            # laps considered for the stint reference pace
     max_delta_s: float = 6.0       # discards laps lost to traffic/incidents
     only_fresh_tyres: bool = True  # d(0)=0 only holds for a brand-new set
+    # The wear law describes a dry tire. A lap the API reports rain on is slow
+    # for reasons that have nothing to do with wear, like a safety-car lap.
+    skip_wet_laps: bool = True
+
+    # Context proxies collapsed to their per-race median after loading; see
+    # `dataset.aggregate_context_by_race` for the measurement behind the default.
+    # Kept in the config so inference builds its context the way training did.
+    aggregate_context: tuple[str, ...] = ("q_fric", "load")
 
     test_fraction: float = 0.25
 
@@ -240,6 +270,31 @@ class Config:
     ranges: ContextRanges = field(default_factory=ContextRanges)
     out_dir: str = "outputs"
 
-    def to_json(self, path: str) -> None:
+    def to_json(self, path: str | Path) -> None:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(asdict(self), fh, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> Config:
+        """Read a configuration written by `to_json`.
+
+        Keys this version does not know are ignored, so model directories saved
+        by older versions still load.
+        """
+        with open(path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        return cls(
+            physics=_from_dict(PhysicsConfig, saved.get("physics", {})),
+            pinn=_from_dict(PINNConfig, saved.get("pinn", {})),
+            data=_from_dict(DataConfig, saved.get("data", {})),
+            ranges=_from_dict(ContextRanges, saved.get("ranges", {})),
+            out_dir=saved.get("out_dir", "outputs"),
+        )
+
+
+def _from_dict(cls, values: dict):
+    """Build a config dataclass from its JSON form: unknown keys dropped, lists back to tuples."""
+    known = {f.name for f in fields(cls)}
+    return cls(
+        **{k: tuple(v) if isinstance(v, list) else v for k, v in values.items() if k in known}
+    )
