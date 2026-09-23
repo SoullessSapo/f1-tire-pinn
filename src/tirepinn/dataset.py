@@ -15,6 +15,13 @@ import numpy as np
 from .config import CONTEXT_NAMES, PhysicsConfig
 
 
+def input_matrix(laps, context, phys: PhysicsConfig) -> np.ndarray:
+    """(n_laps, 6) network input: tau = lap / L_ref, then the context repeated on every row."""
+    tau = np.asarray(laps, dtype=float).reshape(-1, 1) / phys.lap_ref
+    ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))
+    return np.hstack([tau, ctx])
+
+
 @dataclass
 class Stint:
     """One stint: laps, observed pace loss and constant context."""
@@ -30,8 +37,13 @@ class Stint:
     theta_true: np.ndarray | None = None
     d_true: np.ndarray | None = None
     delta_true: np.ndarray | None = None   # noise-free pace curve
-    # Only available with real data: the race lap number.
-    race_laps: np.ndarray | None = None
+
+    # Only available with real data.
+    race_laps: np.ndarray | None = None    # race lap number of each stint lap
+    race: str = ""                         # the race, as the API names it
+    # Conditions reported by the API over the stint (medians; rain as the
+    # fraction of wet laps). Keys are `data_fastf1.WEATHER_CHANNELS` values.
+    weather: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.laps = np.asarray(self.laps, dtype=float).ravel()
@@ -56,9 +68,7 @@ class Stint:
 
     def inputs(self, phys: PhysicsConfig) -> np.ndarray:
         """(n_laps, 6) network input matrix: tau plus the replicated context."""
-        tau = self.tau(phys).reshape(-1, 1)
-        ctx = np.tile(self.context.reshape(1, -1), (tau.shape[0], 1))
-        return np.hstack([tau, ctx])
+        return input_matrix(self.laps, self.context, phys)
 
 
 @dataclass
@@ -128,12 +138,19 @@ class StintDataset:
         for s in self.stints:
             comps[s.compound] = comps.get(s.compound, 0) + 1
         comp_txt = ", ".join(f"{k}:{v}" for k, v in sorted(comps.items()))
-        return (
-            f"Source: {self.source} | stints: {len(self.stints)} | laps: {self.n_laps}\n"
-            f"  Stint length:  min={lens.min()} med={np.median(lens):.0f} max={lens.max()}\n"
-            f"  Pace loss:     min={deltas.min():.2f}s med={np.median(deltas):.2f}s max={deltas.max():.2f}s\n"
-            f"  Compounds: {comp_txt}"
-        )
+        lines = [
+            f"Source: {self.source} | stints: {len(self.stints)} | laps: {self.n_laps}",
+            f"  Stint length:  min={lens.min()} med={np.median(lens):.0f} max={lens.max()}",
+            f"  Pace loss:     min={deltas.min():.2f}s med={np.median(deltas):.2f}s max={deltas.max():.2f}s",
+            f"  Compounds: {comp_txt}",
+        ]
+        for key, label in (("track_temp_c", "Track temp"), ("air_temp_c", "Air temp")):
+            temps = np.array([s.weather[key] for s in self.stints if key in s.weather])
+            if temps.size:
+                lines.append(
+                    f"  {label + ':':14s} min={temps.min():.1f}C med={np.median(temps):.1f}C max={temps.max():.1f}C"
+                )
+        return "\n".join(lines)
 
 
 def aggregate_context_by_race(
@@ -163,8 +180,11 @@ def aggregate_context_by_race(
     `speed` is deliberately not aggregated by default: its within-circuit
     deviation does correlate with degradation (r = -0.203, significant), so
     averaging it would throw away real signal.
+
+    Stints are grouped by `Stint.race` unless another `key` is given. The
+    stints are modified in place.
     """
-    key = key or (lambda s: s.stint_id[:3])
+    key = key or (lambda s: s.race)
     idx = [CONTEXT_NAMES.index(f) for f in fields]
 
     groups: dict[str, list[Stint]] = {}

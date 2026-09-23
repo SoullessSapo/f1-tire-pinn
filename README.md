@@ -189,11 +189,26 @@ sees the effect of compound and time.
 python run_train.py --source fastf1 --year 2023 --gp Monza Hungary Bahrain Spain
 ```
 
-Inference and latency measurement with a trained model:
+Without `--gp`, every race of the season already run is taken from the API's
+event schedule:
 
 ```bash
-python run_infer.py --compound SOFT --track-temp 0.8 --load 1.2
+python run_train.py --source fastf1 --year 2026
 ```
+
+Inference and latency measurement with a trained model. You name the race, the
+driver and the lap; everything else is read from the API for that lap: compound,
+tire age, track temperature and the rest of the weather, the telemetry proxies
+of the laps run so far, and the laps left to the flag. The model is loaded with
+the `config.json` it was trained with, so its inputs are normalised exactly as
+in training.
+
+```bash
+python run_infer.py --model outputs/2026 --gp Spa --driver VER --lap 25
+```
+
+Without `--lap` it predicts from the driver's last completed lap; `--year`
+defaults to the season the model was trained on.
 
 ### Outputs in `outputs/`
 
@@ -250,14 +265,33 @@ because numerical second derivatives amplify sampling noise.
 
 The degradation observable is pace loss **corrected for fuel**: a car sheds
 ~100 kg over a race and that is worth more than a second a lap. Uncorrected, the
-weight loss completely masks degradation.
+weight loss completely masks degradation. The correction is estimated per race,
+together with track evolution (see [section 9](#9-the-2026-season)).
+
+**Everything that describes the race comes from the API**, never from a
+hard-coded value:
+
+| Value | FastF1 source |
+|---|---|
+| compound, tire age, stint, fresh or used set | lap timing (`Compound`, `TyreLife`, `Stint`, `FreshTyre`) |
+| track temperature | weather feed (`TrackTemp`), interpolated at the moment each lap starts |
+| air temperature, humidity, pressure, wind, rain | weather feed; stored with every lap and stint, rain also filters laps |
+| deleted lap times | race-control messages (FastF1 derives `Deleted` from them) |
+| race distance | session (`total_laps`) |
+| races of a season | event schedule (`get_event_schedule`), when `--gp` is omitted |
+
+A lap the API cannot describe is dropped rather than filled in: an unknown
+compound is never assumed to be a medium, and a session without weather data is
+rejected rather than given a made-up track temperature.
 
 Quality filters applied: green flag only (`TrackStatus == 1`), no in/out laps,
-`IsAccurate` only, no deleted laps, and fresh sets only (`FreshTyre`) — because
-`d(0) = 0` only holds for a new tire.
+`IsAccurate` only, no deleted laps, no laps with rain reported, and fresh sets
+only (`FreshTyre`) — because `d(0) = 0` only holds for a new tire.
 
 The proxies are made dimensionless against **fixed references** (`q_fric_ref`,
 `load_ref`, `speed_ref` in `DataConfig`), not against each session's median.
+Track temperature uses the same scale as `θ` (`ΔT_ref` = 40 K from
+`track_temp_ref_c` = 20 °C), so that `θ + T_trk` in (E2) is a single temperature.
 Normalising each race against itself would put both Monza and Hungary at 1.0 and
 erase precisely the between-circuit variation the model needs. The constants are
 calibrated from 2023 races (Monza 1877 W/kg · 3.39 g · 66.4 m/s; Hungary 1968 ·
@@ -696,12 +730,12 @@ src/tirepinn/
   pinn.py            the parametric PINN (DeepXDE)
   dataset.py         Stint / StintDataset, splitting, domain bounds
   data_synthetic.py  test bench with known ground truth
-  data_fastf1.py     real telemetry and feature engineering
+  data_fastf1.py     real data from the FastF1 API: laps, weather, telemetry features
   baselines.py       classic linear and LSTM
   evaluate.py        metrics
   plots.py           figures
 run_train.py         training + comparison + figures
-run_infer.py         inference and latency
+run_infer.py         prediction for a driver at a given lap, from the API, and latency
 ```
 
 A full walkthrough of the reasoning, the modelling choices and the four

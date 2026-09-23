@@ -18,12 +18,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from .config import COMPOUND_INDEX, ContextRanges, DataConfig, PhysicsConfig
+from .config import COMPOUND_INDEX, DRY_COMPOUNDS, ContextRanges, DataConfig, PhysicsConfig
 from .dataset import Stint, StintDataset
 from .physics import GROUND_TRUTH, TireParams, integrate_stint, pace_loss
-
-# Compounds simulated, in order.
-_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
 
 
 def _sample_context(rng: np.random.Generator, ranges: ContextRanges, compound: str) -> np.ndarray:
@@ -49,7 +46,7 @@ def generate(
     stints: list[Stint] = []
 
     for i in range(cfg.n_stints):
-        compound = _COMPOUNDS[i % len(_COMPOUNDS)]
+        compound = DRY_COMPOUNDS[i % len(DRY_COMPOUNDS)]
         context = _sample_context(rng, ranges, compound)
 
         # Integrate to the maximum length, then decide where the team would

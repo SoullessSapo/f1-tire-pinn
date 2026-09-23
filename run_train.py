@@ -5,6 +5,7 @@ Examples
     python run_train.py --source synthetic --stints 64
     python run_train.py --source synthetic --quick
     python run_train.py --source fastf1 --year 2023 --gp Monza Hungary
+    python run_train.py --source fastf1 --year 2026     # every 2026 race run so far
 """
 
 from __future__ import annotations
@@ -12,19 +13,21 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-import numpy as np
-
 from tirepinn import plots
 from tirepinn.baselines import LinearDegBaseline, LSTMBaseline
-from tirepinn.config import REAL_DATA_FREE_PARAMS, Config
-from tirepinn.dataset import aggregate_context_by_race
-from tirepinn.evaluate import evaluate, format_report, parameter_recovery
+from tirepinn.config import LEARNABLE_PARAMS, REAL_DATA_FREE_PARAMS, Config, DataConfig
+from tirepinn.dataset import StintDataset, aggregate_context_by_race
+from tirepinn.evaluate import evaluate, format_recovery, format_report, parameter_recovery
 from tirepinn.physics import GROUND_TRUTH
-from tirepinn.pinn import LEARNABLE, TirePINN
+from tirepinn.pinn import TirePINN
+
+# Settings of --quick: a short run that validates the pipeline end to end.
+QUICK_RUN = {"adam_iters": 1200, "lbfgs_iters": 300, "n_stints": 16, "lstm_epochs": 200}
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,16 +43,19 @@ def parse_args() -> argparse.Namespace:
     g.add_argument("--stints", type=int, default=64)
 
     g = p.add_argument_group("fastf1")
-    g.add_argument("--year", type=int, default=2023)
+    g.add_argument(
+        "--year", type=int, default=date.today().year, help="season (default: the current one)"
+    )
     g.add_argument(
         "--gp",
         nargs="+",
-        default=["Monza"],
-        help="one or more races. With several the context genuinely varies; "
-        "with only one the model mostly sees the effect of compound alone.",
+        default=None,
+        help="one or more races. Default: every race of the season already run, "
+        "from the API's event schedule. With several the context genuinely "
+        "varies; with only one the model mostly sees the effect of compound alone.",
     )
     g.add_argument("--session", default="R")
-    g.add_argument("--drivers", nargs="*", default=[], help="e.g. VER HAM LEC")
+    g.add_argument("--drivers", nargs="*", default=[], help="e.g. VER HAM LEC (default: all)")
 
     g = p.add_argument_group("training")
     g.add_argument("--adam", type=int, default=15000)
@@ -59,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     g.add_argument(
         "--aggregate-context",
         nargs="+",
-        default=["q_fric", "load"],
+        default=list(DataConfig.aggregate_context),
         metavar="FIELD",
         help="collapse these context proxies to their per-race median. The "
         "default pair is measured, not guessed: their within-circuit variation "
@@ -85,58 +91,95 @@ def parse_args() -> argparse.Namespace:
 def build_config(args: argparse.Namespace) -> Config:
     cfg = Config(out_dir=args.out)
     cfg.pinn.seed = args.seed
-    cfg.pinn.adam_iters = 1200 if args.quick else args.adam
-    cfg.pinn.lbfgs_iters = 300 if args.quick else args.lbfgs
+    cfg.pinn.adam_iters = QUICK_RUN["adam_iters"] if args.quick else args.adam
+    cfg.pinn.lbfgs_iters = QUICK_RUN["lbfgs_iters"] if args.quick else args.lbfgs
     cfg.data.source = args.source
-    cfg.data.n_stints = 16 if args.quick else args.stints
+    cfg.data.n_stints = QUICK_RUN["n_stints"] if args.quick else args.stints
     cfg.data.year = args.year
-    cfg.data.gp = args.gp[0]
+    cfg.data.races = tuple(args.gp or ())
     cfg.data.session = args.session
     cfg.data.drivers = tuple(args.drivers)
+    cfg.data.aggregate_context = tuple(args.aggregate_context)
     # Temperature is not observable in real data: only the synthetic bench can
     # give the network a thermal reference.
     cfg.pinn.use_theta_proxy = args.source == "synthetic"
-
     if args.source == "fastf1":
-        # The thermo-mechanical law is calibrated on the physics bench, where
-        # ground truth exists; on real telemetry only the quantities that change
-        # between circuits or tire batches are fitted.
-        # See config.REAL_DATA_FREE_PARAMS for the full argument.
-        free = tuple(args.free_params) if args.free_params else REAL_DATA_FREE_PARAMS
-        unknown = set(free) - set(LEARNABLE)
-        if unknown:
-            raise SystemExit(f"unknown parameters in --free-params: {sorted(unknown)}")
-        for name in LEARNABLE:
-            if name not in free:
-                setattr(cfg.physics, f"{name}_init", float(getattr(GROUND_TRUTH, name)))
-        cfg.pinn.free_params = free
-
-        # The weight of the data term should scale with data quality. Synthetic
-        # timing has sigma ~0.06 s, so its term drops to ~0.004 and stops pulling
-        # on the gradient. A real lap has sigma ~0.5 s from traffic, wind and
-        # driving, and its term plateaus around ~0.25: at the same weight it
-        # would dominate forever and drag the network away from the ODE. The
-        # weight is lowered so physics still counts once the noise floor is hit.
-        cfg.pinn.w_data_delta = 5.0
+        configure_for_real_data(cfg, args.free_params)
     return cfg
 
 
-def load_data(cfg: Config, args: argparse.Namespace):
+def configure_for_real_data(cfg: Config, free_params: list[str] | None) -> None:
+    """Settings that change when training on real telemetry instead of the synthetic bench."""
+    # The thermo-mechanical law is calibrated on the physics bench, where ground
+    # truth exists; on real telemetry only the quantities that change between
+    # circuits or tire batches are fitted. See config.REAL_DATA_FREE_PARAMS for
+    # the full argument.
+    free = tuple(free_params) if free_params else REAL_DATA_FREE_PARAMS
+    unknown = set(free) - set(LEARNABLE_PARAMS)
+    if unknown:
+        raise SystemExit(f"unknown parameters in --free-params: {sorted(unknown)}")
+    for name in LEARNABLE_PARAMS:
+        if name not in free:
+            setattr(cfg.physics, f"{name}_init", float(getattr(GROUND_TRUTH, name)))
+    cfg.pinn.free_params = free
+
+    # The weight of the data term should scale with data quality. Synthetic
+    # timing has sigma ~0.06 s, so its term drops to ~0.004 and stops pulling on
+    # the gradient. A real lap has sigma ~0.5 s from traffic, wind and driving,
+    # and its term plateaus around ~0.25: at the same weight it would dominate
+    # forever and drag the network away from the ODE. The weight is lowered so
+    # physics still counts once the noise floor is hit.
+    cfg.pinn.w_data_delta = 5.0
+
+
+def load_data(cfg: Config) -> StintDataset:
+    """The stints to train and test on: the synthetic bench, or races from the FastF1 API."""
     if cfg.data.source == "synthetic":
         from tirepinn import data_synthetic
 
-        return data_synthetic.generate(cfg.data, cfg.physics, cfg.ranges, seed=args.seed)
+        return data_synthetic.generate(cfg.data, cfg.physics, cfg.ranges, seed=cfg.pinn.seed)
+
     from tirepinn import data_fastf1
 
-    if len(args.gp) == 1:
-        data = data_fastf1.build_dataset(cfg.data, cfg.physics)
-    else:
-        data = data_fastf1.build_multi_dataset(cfg.data, cfg.physics, args.gp)
+    if not cfg.data.races:
+        # Stored back in the config, so the saved config.json lists the races used.
+        cfg.data.races = tuple(data_fastf1.season_races(cfg.data))
+        if not cfg.data.races:
+            raise SystemExit(f"The API lists no {cfg.data.year} race run yet: pass --year or --gp")
+        print(f"  {len(cfg.data.races)} races of {cfg.data.year} taken from the API's event schedule")
 
-    if args.aggregate_context:
-        data = aggregate_context_by_race(data, args.aggregate_context)
-        print(f"  Context collapsed to race medians: {', '.join(args.aggregate_context)}")
+    if len(cfg.data.races) == 1:
+        data = data_fastf1.build_dataset(cfg.data, cfg.physics, cfg.data.races[0])
+    else:
+        data = data_fastf1.build_multi_dataset(cfg.data, cfg.physics, cfg.data.races)
+
+    if cfg.data.aggregate_context:
+        data = aggregate_context_by_race(data, cfg.data.aggregate_context)
+        print(f"  Context collapsed to race medians: {', '.join(cfg.data.aggregate_context)}")
     return data
+
+
+def fit_baselines(cfg: Config, train: StintDataset, args: argparse.Namespace) -> dict:
+    """The two reference models: the classic linear fit and the black-box LSTM."""
+    epochs = QUICK_RUN["lstm_epochs"] if args.quick else args.lstm_epochs
+    return {
+        "Linear (classic)": LinearDegBaseline(cfg.physics).fit(train),
+        "LSTM (black box)": LSTMBaseline(cfg.physics, epochs=epochs, seed=args.seed).fit(train),
+    }
+
+
+def save_figures(models: dict, pinn: TirePINN, test: StintDataset, cfg: Config, out: Path) -> None:
+    loss_labels = ["Thermal ODE", "Wear ODE", "Bound d<=dmax", "Data: pace"]
+    if cfg.pinn.use_theta_proxy:
+        loss_labels.append("Data: temperature")
+    truth = GROUND_TRUTH if cfg.data.source == "synthetic" else None
+
+    plots.plot_stint_grid(models, test, cfg.physics, out / "01_stints.png")
+    plots.plot_extrapolation(models, test, cfg.physics, out / "02_extrapolation.png")
+    plots.plot_latent_states(pinn, test, cfg.physics, out / "03_latent_states.png")
+    plots.plot_parameter_convergence(pinn.var_history, truth, out / "04_parameters.png")
+    plots.plot_loss_history(pinn.loss_history, out / "05_loss.png", loss_labels)
+    plots.plot_cliff_map(pinn, cfg.physics, out / "06_cliff_map.png")
 
 
 def main() -> int:
@@ -149,7 +192,7 @@ def main() -> int:
     print("F1 tire degradation PINN")
     print("=" * 78)
 
-    data = load_data(cfg, args)
+    data = load_data(cfg)
     print(data.describe())
     train, test = data.split(cfg.data.test_fraction, seed=args.seed)
     print(f"  Split by stint: {len(train)} train / {len(test)} test\n")
@@ -161,19 +204,15 @@ def main() -> int:
     pinn.build(train)
     pinn.train(out)
     print(f"      done in {time.perf_counter() - t0:.1f} s\n")
-
     models = {"PINN": pinn}
 
     # ----------------------------------------------------------- baselines --
-    if not args.no_baselines:
-        print("[2/4] Fitting baselines ...")
-        models["Linear (classic)"] = LinearDegBaseline(cfg.physics).fit(train)
-        models["LSTM (black box)"] = LSTMBaseline(
-            cfg.physics, epochs=200 if args.quick else args.lstm_epochs, seed=args.seed
-        ).fit(train)
-        print("      done\n")
-    else:
+    if args.no_baselines:
         print("[2/4] Baselines skipped\n")
+    else:
+        print("[2/4] Fitting baselines ...")
+        models.update(fit_baselines(cfg, train, args))
+        print("      done\n")
 
     # ---------------------------------------------------------- evaluation --
     print("[3/4] Evaluating on unseen stints ...\n")
@@ -181,43 +220,19 @@ def main() -> int:
     report = format_report(metrics)
     print(report)
 
-    recovery_txt = ""
+    recovery = ""
     if cfg.data.source == "synthetic":
         rows = parameter_recovery(pinn.learned_params(), GROUND_TRUTH, cfg.pinn.free_params)
-        lines = [
-            "",
-            "Physical parameter recovery (inverse problem)",
-            f"{'Parameter':10s} {'Estimated':>10s} {'True':>10s} {'Rel. error':>11s}",
-            "-" * 45,
-        ]
-        lines += [f"{n:10s} {est:10.4f} {ref:10.4f} {rel:10.1f}%" for n, est, ref, rel in rows]
-        lines.append(
-            f"{'':10s} {'':>10s} {'mean':>10s} {np.mean([r[3] for r in rows]):10.1f}%"
-        )
-        recovery_txt = "\n".join(lines)
-        print(recovery_txt)
+        recovery = format_recovery(rows)
+        print(recovery)
 
     # ------------------------------------------------------------- outputs --
     print("\n[4/4] Generating figures ...")
-    loss_labels = ["Thermal ODE", "Wear ODE", "Bound d<=dmax", "Data: pace"]
-    if cfg.pinn.use_theta_proxy:
-        loss_labels.append("Data: temperature")
-
-    plots.plot_stint_grid(models, test, cfg.physics, out / "01_stints.png")
-    plots.plot_extrapolation(models, test, cfg.physics, out / "02_extrapolation.png")
-    plots.plot_latent_states(pinn, test, cfg.physics, out / "03_latent_states.png")
-    plots.plot_parameter_convergence(
-        pinn.var_history,
-        GROUND_TRUTH if cfg.data.source == "synthetic" else None,
-        out / "04_parameters.png",
-    )
-    plots.plot_loss_history(pinn.loss_history, out / "05_loss.png", loss_labels)
-    plots.plot_cliff_map(pinn, cfg.physics, out / "06_cliff_map.png")
-
+    save_figures(models, pinn, test, cfg, out)
     pinn.save(out)
-    cfg.to_json(str(out / "config.json"))
+    cfg.to_json(out / "config.json")
     with open(out / "report.txt", "w", encoding="utf-8") as fh:
-        fh.write(data.describe() + "\n\n" + report + "\n" + recovery_txt + "\n")
+        fh.write(data.describe() + "\n\n" + report + "\n" + recovery + "\n")
 
     print(f"      figures, model and report in {out.resolve()}")
     return 0

@@ -553,9 +553,27 @@ Lo que sí es público, vía la librería **FastF1** (datos oficiales de F1):
 - Telemetría de a bordo: velocidad, acelerador, freno, marcha, RPM (~10 Hz).
 - Posición GPS: X, Y, Z (~4 Hz).
 - Cronometraje: tiempo por vuelta, stint, compuesto, edad del neumático.
-- Meteorología: temperatura de aire y de pista.
+- Meteorología (una muestra por minuto): temperatura de pista y de aire,
+  humedad, presión, viento (velocidad y dirección) y lluvia.
+- Mensajes de dirección de carrera: de ellos saca FastF1 qué vueltas se borraron.
+- Calendario de la temporada y distancia de cada carrera.
 
 Toda la ingeniería de características consiste en cerrar esa brecha.
+
+**Todo lo que describe la carrera sale de la API, nunca de un valor fijo en el
+código.** El compuesto, la edad del neumático y el stint vienen del
+cronometraje; la temperatura de pista, de la meteorología interpolada en el
+instante en que empieza cada vuelta; el resto de la meteorología se guarda con
+cada vuelta y cada stint; la distancia de carrera, de la sesión; y si no se
+indican carreras con `--gp`, la lista sale del calendario de la temporada. Una
+vuelta que la API no sabe describir se descarta en vez de rellenarse: un
+compuesto desconocido nunca se da por "medio", y una sesión sin datos
+meteorológicos se rechaza en vez de inventarle una temperatura de pista.
+
+Lo mismo vale para la inferencia: `run_infer.py` recibe solo la carrera, el
+piloto y la vuelta, y lee de la API el compuesto, la edad del neumático, la
+meteorología de esa vuelta, los proxies de telemetría de las vueltas ya
+disputadas (nunca de las siguientes) y las vueltas que faltan para la bandera.
 
 ## 9.2 Las variables proxy
 
@@ -592,6 +610,9 @@ del stint por aligeramiento **justo cuando el neumático lo está frenando por
 desgaste**, y los dos efectos se cancelan visualmente.
 
 Se corrige restando `k_fuel × (vueltas_restantes)`, con `k_fuel = 0.055 s/vuelta`.
+Esa constante fue la primera versión; hoy el efecto se estima por carrera, junto
+con la evolución de la pista (ver 14.2), y la constante queda solo como
+alternativa si se desactiva la estimación.
 
 ## 9.4 Filtros de calidad
 
@@ -601,7 +622,12 @@ Se descartan las vueltas que son lentas por razones ajenas al neumático:
   segundos.
 - Sin vueltas de entrada o salida de boxes.
 - Solo vueltas marcadas `IsAccurate` por FastF1.
-- Sin vueltas borradas por la FIA.
+- Sin vueltas borradas por la FIA. FastF1 marca `Deleted` a partir de los
+  mensajes de dirección de carrera, así que la sesión se carga con ellos. Antes
+  se cargaba sin ellos: todas las vueltas aparecían como no borradas y este
+  filtro, en la práctica, no descartaba nada.
+- Sin vueltas con lluvia según la meteorología de la API — el modelo describe
+  un neumático en seco.
 - Solo juegos nuevos — porque `d(0) = 0` solo tiene sentido con un neumático
   nuevo.
 
@@ -1087,9 +1113,12 @@ set DDE_BACKEND=pytorch
 
 python run_train.py --source synthetic --stints 64          # ~30 min
 python run_train.py --source synthetic --quick              # ~2 min, valida el pipeline
-python run_train.py --source fastf1 --gp Monza Hungary      # telemetría real 2023
+python run_train.py --source fastf1 --year 2023 --gp Monza Hungary      # telemetría real 2023
 python run_train.py --source fastf1 --year 2026 --gp Melbourne Suzuka Barcelona Budapest   # 2026
-python run_infer.py --compound SOFT --track-temp 0.8        # inferencia + latencia
+python run_train.py --source fastf1 --year 2026            # todas las carreras de 2026 ya corridas, según la API
+
+# inferencia + latencia: carrera, piloto y vuelta; el resto sale de la API
+python run_infer.py --model outputs/2026 --gp Spa --driver VER --lap 25
 ```
 
 ## Estructura del código
@@ -1101,12 +1130,12 @@ src/tirepinn/
   pinn.py            la PINN paramétrica (DeepXDE)
   dataset.py         Stint / StintDataset, partición, dominio
   data_synthetic.py  banco de pruebas con verdad conocida
-  data_fastf1.py     telemetría real e ingeniería de características
+  data_fastf1.py     datos reales de la API de FastF1: vueltas, meteorología, telemetría
   baselines.py       lineal clásico y LSTM
   evaluate.py        métricas
   plots.py           figuras
 run_train.py         entrenamiento + comparación + figuras
-run_infer.py         inferencia y latencia
+run_infer.py         predicción para un piloto en una vuelta, desde la API, y latencia
 ```
 
 ## Referencias
