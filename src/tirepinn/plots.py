@@ -100,7 +100,9 @@ def plot_latent_states(
 
     for j, stint in enumerate(stints):
         pred = pinn.predict_curve(stint.context, stint.laps)
-        axes[0, j].plot(stint.laps, stint.theta_true, "o", ms=3, color="black", label="Ground truth")
+        axes[0, j].plot(
+            stint.laps, stint.theta_true, "o", ms=3, color="black", label="Ground truth"
+        )
         axes[0, j].plot(stint.laps, pred["theta"], lw=1.8, color="#d62728", label="PINN")
         axes[0, j].set_title(f"{stint.stint_id} - {stint.compound}", fontsize=9)
         axes[0, j].set_ylabel(r"$\theta$  (thermal excess)")
@@ -215,6 +217,46 @@ def plot_loss_history(losshistory, path: str | Path, labels: list[str] | None = 
     plt.close(fig)
 
 
+def _wear_limit_grid(
+    pinn,
+    phys: PhysicsConfig,
+    compound_idx: float,
+    load: np.ndarray,
+    track: np.ndarray,
+    horizon: int,
+) -> np.ndarray:
+    """(len(load), len(track)) grid of the lap at which d passes d_crit; NaN if never.
+
+    Friction energy and speed are held at their reference value of 1.0. Every
+    cell is evaluated in a single call: the network is parametric, so the whole
+    grid costs one batched forward pass.
+    """
+    laps = np.arange(1, horizon + 1, dtype=float)
+    tau = laps / phys.lap_ref
+    grid_load, grid_track = np.meshgrid(load, track, indexing="ij")
+    n_cells = grid_load.size
+
+    contexts = np.stack(
+        [
+            np.ones(n_cells),  # q_fric
+            grid_load.ravel(),
+            np.ones(n_cells),  # speed
+            grid_track.ravel(),
+            np.full(n_cells, compound_idx),
+        ],
+        axis=1,
+    )
+    x = np.empty((n_cells * laps.size, contexts.shape[1] + 1))
+    x[:, 0] = np.tile(tau, n_cells)
+    x[:, 1:] = np.repeat(contexts, laps.size, axis=0)
+    _, d = pinn.predict(x)
+    wear_curves = d.reshape(n_cells, laps.size)
+
+    limit_laps = [wear_lap(laps, curve, phys) for curve in wear_curves]
+    grid = np.array([np.nan if lap is None else lap for lap in limit_laps])
+    return grid.reshape(len(load), len(track))
+
+
 def plot_cliff_map(
     pinn, phys: PhysicsConfig, path: str | Path, horizon: int | None = None, res: int = 24
 ) -> None:
@@ -234,35 +276,10 @@ def plot_cliff_map(
     compounds = [("SOFT", 0.0), ("MEDIUM", 0.5), ("HARD", 1.0)]
     track = np.linspace(0.05, 0.95, res)
     load = np.linspace(0.6, 1.4, res)
-    laps = np.arange(1, horizon + 1, dtype=float)
-    tau = laps / phys.lap_ref
-
-    grid_load, grid_track = np.meshgrid(load, track, indexing="ij")
-    n_cells = grid_load.size
-
-    grids = []
-    for _, comp_idx in compounds:
-        contexts = np.stack(
-            [
-                np.ones(n_cells),
-                grid_load.ravel(),
-                np.ones(n_cells),
-                grid_track.ravel(),
-                np.full(n_cells, comp_idx),
-            ],
-            axis=1,
-        )
-        # Every cell in a single call: the network is parametric, so the whole
-        # map costs one batched forward pass.
-        x = np.empty((n_cells * laps.size, contexts.shape[1] + 1))
-        x[:, 0] = np.tile(tau, n_cells)
-        x[:, 1:] = np.repeat(contexts, laps.size, axis=0)
-        _, d = pinn.predict(x)
-        wear = d.reshape(n_cells, laps.size)
-
-        cells = [wear_lap(laps, curve, phys) for curve in wear]
-        grid = np.array([np.nan if c is None else c for c in cells])
-        grids.append(grid.reshape(res, res))
+    grids = [
+        _wear_limit_grid(pinn, phys, compound_idx, load, track, horizon)
+        for _, compound_idx in compounds
+    ]
 
     finite = np.concatenate([g[np.isfinite(g)] for g in grids]) if grids else np.array([1.0])
     vmin, vmax = (float(finite.min()), float(finite.max())) if finite.size else (1.0, horizon)

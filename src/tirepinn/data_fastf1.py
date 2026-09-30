@@ -96,6 +96,7 @@ def _lap_dynamics(tel: pd.DataFrame) -> dict[str, float] | None:
     t = tel["Time"].dt.total_seconds().to_numpy(dtype=float)
     speed = tel["Speed"].to_numpy(dtype=float) / 3.6  # km/h -> m/s
     if not np.all(np.diff(t) > 0):
+        # Merged telemetry can repeat a timestamp; derivatives need strictly increasing t.
         keep = np.concatenate([[True], np.diff(t) > 0])
         t, speed, tel = t[keep], speed[keep], tel.loc[keep]
         if t.size < 20:
@@ -104,20 +105,7 @@ def _lap_dynamics(tel: pd.DataFrame) -> dict[str, float] | None:
     window = _smoothing_window(t)
     speed = _smooth(speed, window)
     a_long = np.gradient(speed, t)
-
-    # Lateral acceleration from the GPS trajectory. FastF1 gives X, Y in
-    # decimetres; the magnitude of the velocity-acceleration cross product
-    # divided by the speed is exactly the normal component of acceleration.
-    if {"X", "Y"}.issubset(tel.columns):
-        x = _smooth(tel["X"].to_numpy(dtype=float) / 10.0, window)
-        y = _smooth(tel["Y"].to_numpy(dtype=float) / 10.0, window)
-        dx, dy = np.gradient(x, t), np.gradient(y, t)
-        ddx, ddy = np.gradient(dx, t), np.gradient(dy, t)
-        planar = np.sqrt(dx**2 + dy**2)
-        a_lat = np.where(planar > 1.0, np.abs(dx * ddy - dy * ddx) / np.maximum(planar, 1e-6), 0.0)
-        a_lat = np.clip(_smooth(a_lat, window), 0.0, 6.0 * _G)  # 6 g is an F1 car's ceiling
-    else:  # pragma: no cover - sessions without position data
-        a_lat = np.zeros_like(speed)
+    a_lat = _lateral_acceleration(tel, t, window)
 
     duration = float(t[-1] - t[0])
     if duration <= 0:
@@ -131,6 +119,30 @@ def _lap_dynamics(tel: pd.DataFrame) -> dict[str, float] | None:
         "load_raw": float(np.mean(a_total) / _G),
         "speed_raw": float(np.mean(speed)),
     }
+
+
+def _lateral_acceleration(tel: pd.DataFrame, t: np.ndarray, window: int) -> np.ndarray:
+    """Lateral acceleration [m/s^2] reconstructed from the GPS trajectory.
+
+    FastF1 gives X, Y in decimetres. The magnitude of the velocity-acceleration
+    cross product divided by the speed is exactly the normal component of the
+    acceleration. Both derivatives are numerical, hence the smoothing before and
+    after.
+    """
+    if not {"X", "Y"}.issubset(tel.columns):  # pragma: no cover - no position data
+        return np.zeros_like(t)
+
+    x = _smooth(tel["X"].to_numpy(dtype=float) / 10.0, window)
+    y = _smooth(tel["Y"].to_numpy(dtype=float) / 10.0, window)
+    dx, dy = np.gradient(x, t), np.gradient(y, t)
+    ddx, ddy = np.gradient(dx, t), np.gradient(dy, t)
+    planar_speed = np.sqrt(dx**2 + dy**2)
+    a_lat = np.where(
+        planar_speed > 1.0,
+        np.abs(dx * ddy - dy * ddx) / np.maximum(planar_speed, 1e-6),
+        0.0,
+    )
+    return np.clip(_smooth(a_lat, window), 0.0, 6.0 * _G)  # 6 g is an F1 car's ceiling
 
 
 def _estimate_race_lap_effect(df: pd.DataFrame, n_knots: int = 4) -> np.ndarray:
@@ -169,7 +181,9 @@ def _estimate_race_lap_effect(df: pd.DataFrame, n_knots: int = 4) -> np.ndarray:
     drivers = pd.get_dummies(df["driver"], prefix="D").to_numpy(dtype=float)
     evo = [lap] + [np.maximum(lap - k, 0.0) for k in knots]
     compounds = pd.get_dummies(df["compound"], prefix="C").to_numpy(dtype=float)
-    deg = [compounds[:, j] * df["tyre_life"].to_numpy(dtype=float) for j in range(compounds.shape[1])]
+    deg = [
+        compounds[:, j] * df["tyre_life"].to_numpy(dtype=float) for j in range(compounds.shape[1])
+    ]
 
     x = np.column_stack([drivers, *evo, *deg])
     y = df["lap_time"].to_numpy(dtype=float)
@@ -182,7 +196,9 @@ def _estimate_race_lap_effect(df: pd.DataFrame, n_knots: int = 4) -> np.ndarray:
     ev = coef[drivers.shape[1] : drivers.shape[1] + len(evo)]
 
     grid = np.arange(0, lap_max + 2, dtype=float)
-    f = ev[0] * grid + sum(e * np.maximum(grid - k, 0.0) for e, k in zip(ev[1:], knots, strict=False))
+    f = ev[0] * grid + sum(
+        e * np.maximum(grid - k, 0.0) for e, k in zip(ev[1:], knots, strict=False)
+    )
     return f - f[0]
 
 
@@ -219,157 +235,28 @@ def load_session(cfg: DataConfig):
 
 
 def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDataset:
-    """Build the stint set from a FastF1 session."""
+    """Build the stint set from a FastF1 session.
+
+    Four steps: per-lap features from telemetry, non-dimensionalisation,
+    race-lap correction (fuel burn + track evolution), and assembly of stints.
+    """
     session = session or load_session(cfg)
     laps = session.laps
     if laps is None or len(laps) == 0:
         raise RuntimeError("The session contains no loaded laps")
 
     total_laps = int(getattr(session, "total_laps", 0) or laps["LapNumber"].max())
-    weather = _track_temp_series(session)
     drivers = list(cfg.drivers) if cfg.drivers else sorted(laps["Driver"].dropna().unique())
 
-    # --- Step 1: raw per-lap features ---
-    records: list[dict] = []
-    for driver in drivers:
-        driver_laps = laps[laps["Driver"] == driver]
-        for _, lap in driver_laps.iterrows():
-            if pd.isna(lap.get("LapTime")) or not bool(lap.get("IsAccurate", False)):
-                continue
-            if not _is_green(lap.get("TrackStatus")):
-                continue
-            if pd.notna(lap.get("PitInTime")) or pd.notna(lap.get("PitOutTime")):
-                continue
-            if bool(lap.get("Deleted", False)):
-                continue
-            # `bool(...)` rather than `is False`: depending on the pandas version
-            # the value can arrive as a Python bool or as numpy.bool_, and with
-            # `is` the filter would silently fail in the second case.
-            if cfg.only_fresh_tyres and not bool(lap.get("FreshTyre", True)):
-                continue
+    df = _lap_features(laps, drivers, cfg, _track_temp_series(session))
+    df = _add_normalised_context(df, cfg)
+    df["lap_time_corr"] = df["lap_time"] - _race_lap_correction(df, cfg, total_laps)
 
-            try:
-                # `iterrows` over a `Laps` object yields `Lap` objects, which
-                # already know how to fetch their own merged telemetry (car + GPS).
-                tel = lap.get_telemetry()
-            except Exception:
-                continue
-            dyn = _lap_dynamics(tel)
-            if dyn is None:
-                continue
-
-            lap_start = lap.get("LapStartTime")
-            start_s = lap_start.total_seconds() if pd.notna(lap_start) else np.nan
-            if weather is not None and np.isfinite(start_s):
-                track_temp = float(np.interp(start_s, weather[0], weather[1]))
-            else:
-                track_temp = 35.0
-
-            tyre_life = lap.get("TyreLife")
-            records.append(
-                {
-                    "driver": driver,
-                    "stint": int(lap.get("Stint", 1)),
-                    "lap_number": int(lap["LapNumber"]),
-                    "tyre_life": float(tyre_life) if pd.notna(tyre_life) else np.nan,
-                    "compound": str(lap.get("Compound", "MEDIUM")).upper(),
-                    "lap_time": float(lap["LapTime"].total_seconds()),
-                    "track_temp": track_temp,
-                    **dyn,
-                }
-            )
-
-    if not records:
-        raise RuntimeError(
-            "No stint survived the quality filters. Try another session, more "
-            "drivers, or relax `only_fresh_tyres`."
-        )
-
-    df = pd.DataFrame.from_records(records)
-
-    # --- Step 2: non-dimensionalisation against fixed references ---
-    # The references are constants from `DataConfig`, not session statistics.
-    # That is what allows training across several races: a high-load circuit and
-    # a low-speed one land at different points of the context space, instead of
-    # both collapsing to 1.0.
-    df["q_fric"] = df["q_fric_raw"] / cfg.q_fric_ref
-    df["load"] = df["load_raw"] / cfg.load_ref
-    df["speed"] = df["speed_raw"] / cfg.speed_ref
-    df["track_temp_norm"] = np.clip((df["track_temp"] - 20.0) / 40.0, 0.0, 1.0)
-    df["compound_idx"] = df["compound"].map(lambda c: COMPOUND_INDEX.get(c, 0.5))
-
-    # --- Step 3: race-lap correction (fuel burn + track evolution) ---
-    # Uncorrected, the car speeding up as it lightens and as the track rubbers in
-    # looks like the opposite of degradation, and masks it entirely.
-    # `estimate_race_lap_effect` measures the combined effect per race instead of
-    # assuming a fixed s/lap figure; see that function for why the two cannot be
-    # separated and why assuming one number biases circuits differently.
-    if cfg.estimate_race_lap_effect:
-        effect = _estimate_race_lap_effect(df)
-        idx = np.clip(df["lap_number"].to_numpy(dtype=int), 0, len(effect) - 1)
-        df["lap_time_corr"] = df["lap_time"] - effect[idx]
-    else:
-        df["lap_time_corr"] = df["lap_time"] - cfg.fuel_effect_s_per_lap * (
-            total_laps - df["lap_number"]
-        )
-
-    # --- Step 4: assembling stints ---
-    stints: list[Stint] = []
+    stints = []
     for (driver, stint_no), group in df.groupby(["driver", "stint"], sort=True):
-        group = group.sort_values("lap_number")
-        if len(group) < cfg.min_stint_laps:
-            continue
-
-        # Tire age: TyreLife accounts for already-used sets; if missing, fall
-        # back to the position within the stint.
-        life = group["tyre_life"].to_numpy(dtype=float)
-        if not np.all(np.isfinite(life)):
-            life = np.arange(1, len(group) + 1, dtype=float)
-
-        # Origin of degradation: the tire's performance PEAK, not its first lap.
-        # A new set comes out cold and gets faster for two or three laps before
-        # it starts falling away. The model is monotone by construction and so
-        # cannot represent that warm-up phase: it is discarded, and d = 0 is
-        # defined at the peak. Without this anchoring every stint starts half a
-        # second offset from the prediction, and that systematic conflict
-        # degenerates the parameter estimates.
-        times = group["lap_time_corr"].to_numpy()
-        ref_idx = int(np.argmin(times[: cfg.ref_window + 1]))
-
-        times = times[ref_idx:]
-        life = life[ref_idx:]
-        delta = times - times[0]
-        age = life - life[0] + 1.0  # the peak becomes lap 1 of the stint
-
-        keep = delta <= cfg.max_delta_s  # discards traffic and driver errors
-        if keep.sum() < cfg.min_stint_laps:
-            continue
-
-        # The context is summarised over the laps that actually enter the fit,
-        # not over the whole group: the warm-up laps were already discarded and
-        # must not influence the median that represents the stint.
-        used = group.iloc[ref_idx:][keep]
-        context = np.array(
-            [
-                float(used["q_fric"].median()),
-                float(used["load"].median()),
-                float(used["speed"].median()),
-                float(used["track_temp_norm"].median()),
-                float(used["compound_idx"].iloc[0]),
-            ]
-        )
-        stints.append(
-            Stint(
-                stint_id=f"{driver}-S{stint_no}",
-                driver=str(driver),
-                compound=str(used["compound"].iloc[0]),
-                laps=age[keep],
-                delta=delta[keep],
-                context=context,
-                race_laps=group["lap_number"].to_numpy()[ref_idx:][keep],
-            )
-        )
-
+        stint = _assemble_stint(str(driver), int(stint_no), group, cfg)
+        if stint is not None:
+            stints.append(stint)
     if not stints:
         raise RuntimeError(
             f"No stint has at least {cfg.min_stint_laps} valid laps. "
@@ -388,6 +275,184 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
     )
 
 
+# --------------------------------------------------------------------------
+# Step 1: raw per-lap features
+# --------------------------------------------------------------------------
+def _lap_features(laps, drivers: Sequence[str], cfg: DataConfig, weather) -> pd.DataFrame:
+    """One row per lap that passes the quality filters, with its telemetry proxies."""
+    records = []
+    for driver in drivers:
+        for _, lap in laps[laps["Driver"] == driver].iterrows():
+            if not _passes_quality_filters(lap, cfg):
+                continue
+            record = _lap_record(driver, lap, weather)
+            if record is not None:
+                records.append(record)
+
+    if not records:
+        raise RuntimeError(
+            "No stint survived the quality filters. Try another session, more "
+            "drivers, or relax `only_fresh_tyres`."
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def _passes_quality_filters(lap, cfg: DataConfig) -> bool:
+    """Keep only clean green-flag laps whose time reflects the tire.
+
+    Rejected: laps without a time or flagged inaccurate, laps under a safety car
+    or yellow flag, in- and out-laps, deleted laps, and (optionally) laps on a
+    used set, because d(0) = 0 only holds for a brand-new tire.
+    """
+    if pd.isna(lap.get("LapTime")) or not bool(lap.get("IsAccurate", False)):
+        return False
+    if not _is_green(lap.get("TrackStatus")):
+        return False
+    if pd.notna(lap.get("PitInTime")) or pd.notna(lap.get("PitOutTime")):
+        return False
+    if bool(lap.get("Deleted", False)):
+        return False
+    # `bool(...)` rather than `is False`: depending on the pandas version the
+    # value can arrive as a Python bool or as numpy.bool_, and with `is` the
+    # filter would silently fail in the second case.
+    used_set = not bool(lap.get("FreshTyre", True))
+    return not (cfg.only_fresh_tyres and used_set)
+
+
+def _lap_record(driver: str, lap, weather) -> dict | None:
+    """Features of one lap, or None if its telemetry is missing or unusable."""
+    try:
+        # `iterrows` over a `Laps` object yields `Lap` objects, which already
+        # know how to fetch their own merged telemetry (car + GPS).
+        tel = lap.get_telemetry()
+    except Exception:
+        return None
+    dynamics = _lap_dynamics(tel)
+    if dynamics is None:
+        return None
+
+    tyre_life = lap.get("TyreLife")
+    return {
+        "driver": driver,
+        "stint": int(lap.get("Stint", 1)),
+        "lap_number": int(lap["LapNumber"]),
+        "tyre_life": float(tyre_life) if pd.notna(tyre_life) else np.nan,
+        "compound": str(lap.get("Compound", "MEDIUM")).upper(),
+        "lap_time": float(lap["LapTime"].total_seconds()),
+        "track_temp": _track_temp_at(lap.get("LapStartTime"), weather),
+        **dynamics,
+    }
+
+
+def _track_temp_at(lap_start, weather, default: float = 35.0) -> float:
+    """Track temperature [C] when the lap started, interpolated from the weather feed."""
+    start_s = lap_start.total_seconds() if pd.notna(lap_start) else np.nan
+    if weather is None or not np.isfinite(start_s):
+        return default
+    times, temps = weather
+    return float(np.interp(start_s, times, temps))
+
+
+# --------------------------------------------------------------------------
+# Step 2: non-dimensionalisation against fixed references
+# --------------------------------------------------------------------------
+def _add_normalised_context(df: pd.DataFrame, cfg: DataConfig) -> pd.DataFrame:
+    """Add the dimensionless context columns the network consumes.
+
+    The references are constants from `DataConfig`, not session statistics.
+    That is what allows training across several races: a high-load circuit and
+    a low-speed one land at different points of the context space, instead of
+    both collapsing to 1.0.
+    """
+    df["q_fric"] = df["q_fric_raw"] / cfg.q_fric_ref
+    df["load"] = df["load_raw"] / cfg.load_ref
+    df["speed"] = df["speed_raw"] / cfg.speed_ref
+    df["track_temp_norm"] = np.clip((df["track_temp"] - 20.0) / 40.0, 0.0, 1.0)
+    df["compound_idx"] = df["compound"].map(lambda c: COMPOUND_INDEX.get(c, 0.5))
+    return df
+
+
+# --------------------------------------------------------------------------
+# Step 3: race-lap correction (fuel burn + track evolution)
+# --------------------------------------------------------------------------
+def _race_lap_correction(df: pd.DataFrame, cfg: DataConfig, total_laps: int) -> np.ndarray:
+    """Seconds to subtract from each lap time to remove the race-lap effect.
+
+    Uncorrected, the car speeding up as it lightens and as the track rubbers in
+    looks like the opposite of degradation, and masks it entirely. By default the
+    combined effect is measured per race (see `_estimate_race_lap_effect` for
+    why the two parts cannot be separated and why one fixed number biases
+    circuits differently); the fixed fuel figure is only a fallback.
+    """
+    if cfg.estimate_race_lap_effect:
+        effect = _estimate_race_lap_effect(df)
+        idx = np.clip(df["lap_number"].to_numpy(dtype=int), 0, len(effect) - 1)
+        return effect[idx]
+    return cfg.fuel_effect_s_per_lap * (total_laps - df["lap_number"])
+
+
+# --------------------------------------------------------------------------
+# Step 4: assembling stints
+# --------------------------------------------------------------------------
+def _assemble_stint(
+    driver: str, stint_no: int, group: pd.DataFrame, cfg: DataConfig
+) -> Stint | None:
+    """Turn one driver's laps on one set of tires into a `Stint`, or None if too short."""
+    group = group.sort_values("lap_number")
+    if len(group) < cfg.min_stint_laps:
+        return None
+
+    # Tire age: TyreLife accounts for already-used sets; if missing, fall back
+    # to the position within the stint.
+    life = group["tyre_life"].to_numpy(dtype=float)
+    if not np.all(np.isfinite(life)):
+        life = np.arange(1, len(group) + 1, dtype=float)
+
+    # Origin of degradation: the tire's performance PEAK, not its first lap. A
+    # new set comes out cold and gets faster for two or three laps before it
+    # starts falling away. The model is monotone by construction and so cannot
+    # represent that warm-up phase: it is discarded, and d = 0 is defined at the
+    # peak. Without this anchoring every stint starts half a second offset from
+    # the prediction, and that systematic conflict degenerates the parameter
+    # estimates.
+    times = group["lap_time_corr"].to_numpy()
+    peak = int(np.argmin(times[: cfg.ref_window + 1]))
+
+    times, life = times[peak:], life[peak:]
+    delta = times - times[0]
+    age = life - life[0] + 1.0  # the peak becomes lap 1 of the stint
+
+    keep = delta <= cfg.max_delta_s  # discards traffic and driver errors
+    if keep.sum() < cfg.min_stint_laps:
+        return None
+
+    # The context is summarised over the laps that actually enter the fit, not
+    # over the whole group: the warm-up laps were already discarded and must
+    # not influence the median that represents the stint.
+    used = group.iloc[peak:][keep]
+    context = np.array(
+        [
+            float(used["q_fric"].median()),
+            float(used["load"].median()),
+            float(used["speed"].median()),
+            float(used["track_temp_norm"].median()),
+            float(used["compound_idx"].iloc[0]),
+        ]
+    )
+    return Stint(
+        stint_id=f"{driver}-S{stint_no}",
+        driver=driver,
+        compound=str(used["compound"].iloc[0]),
+        laps=age[keep],
+        delta=delta[keep],
+        context=context,
+        race_laps=group["lap_number"].to_numpy()[peak:][keep],
+    )
+
+
+# --------------------------------------------------------------------------
+# Several races, with an on-disk cache
+# --------------------------------------------------------------------------
 def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
     """Cache file for one (year, session, races) combination.
 
@@ -418,7 +483,9 @@ def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
         )
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
-    return Path(cfg.cache_dir) / "datasets" / f"{cfg.year}-{cfg.session}-{len(gps)}races-{digest}.pkl"
+    return (
+        Path(cfg.cache_dir) / "datasets" / f"{cfg.year}-{cfg.session}-{len(gps)}races-{digest}.pkl"
+    )
 
 
 def build_multi_dataset(
@@ -439,8 +506,7 @@ def build_multi_dataset(
     """
     cache_path = _dataset_cache_path(cfg, gps)
     if use_cache and cache_path.exists():
-        with open(cache_path, "rb") as fh:
-            data = pickle.load(fh)
+        data = _read_pickle(cache_path)
         print(f"  [cache] {len(data)} stints read from {cache_path.name}")
         return data
 
@@ -448,24 +514,24 @@ def build_multi_dataset(
     sources, failures = [], []
 
     for i, gp in enumerate(gps, 1):
+        progress = f"  [{i}/{len(gps)}] {gp}"
         race_cfg = replace(cfg, gp=gp)
         race_cache = _dataset_cache_path(race_cfg, [gp])
         if use_cache and race_cache.exists():
-            with open(race_cache, "rb") as fh:
-                part = pickle.load(fh)
-            print(f"  [{i}/{len(gps)}] {gp}: {len(part.stints)} stints (cached)")
+            part = _read_pickle(race_cache)
+            print(f"{progress}: {len(part.stints)} stints (cached)")
         else:
             try:
                 part = build_dataset(race_cfg, phys)
             except Exception as exc:
                 failures.append(f"{gp}: {exc}")
-                print(f"  [{i}/{len(gps)}] {gp}: FAILED ({exc})")
+                print(f"{progress}: FAILED ({exc})")
                 continue
             if use_cache:
-                race_cache.parent.mkdir(parents=True, exist_ok=True)
-                with open(race_cache, "wb") as fh:
-                    pickle.dump(part, fh)
-            print(f"  [{i}/{len(gps)}] {gp}: {len(part.stints)} stints")
+                _write_pickle(part, race_cache)
+            print(f"{progress}: {len(part.stints)} stints")
+
+        # Prefix the race so stint ids stay unique across the season.
         for stint in part.stints:
             stint.stint_id = f"{gp[:3].upper()}-{stint.stint_id}"
         all_stints.extend(part.stints)
@@ -480,7 +546,16 @@ def build_multi_dataset(
         meta={"races": list(gps), "failures": failures},
     )
     if use_cache:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "wb") as fh:
-            pickle.dump(data, fh)
+        _write_pickle(data, cache_path)
     return data
+
+
+def _read_pickle(path: Path):
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
+
+
+def _write_pickle(obj, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as fh:
+        pickle.dump(obj, fh)

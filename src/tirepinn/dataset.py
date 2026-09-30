@@ -7,12 +7,25 @@ the physics it enforces is an ODE in time *within* a stint.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from .config import CONTEXT_NAMES, PhysicsConfig
+
+
+def stint_inputs(laps: np.ndarray, context: np.ndarray, phys: PhysicsConfig) -> np.ndarray:
+    """(n_laps, 6) network input matrix for one stint.
+
+    Column 0 is the dimensionless time tau = lap / L_ref; the other five repeat
+    the stint's context on every row. Every model is queried with this layout,
+    so it is built in exactly one place.
+    """
+    tau = np.asarray(laps, dtype=float).reshape(-1, 1) / phys.lap_ref
+    ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))
+    return np.hstack([tau, ctx])
 
 
 @dataclass
@@ -56,9 +69,7 @@ class Stint:
 
     def inputs(self, phys: PhysicsConfig) -> np.ndarray:
         """(n_laps, 6) network input matrix: tau plus the replicated context."""
-        tau = self.tau(phys).reshape(-1, 1)
-        ctx = np.tile(self.context.reshape(1, -1), (tau.shape[0], 1))
-        return np.hstack([tau, ctx])
+        return stint_inputs(self.laps, self.context, phys)
 
 
 @dataclass
@@ -120,19 +131,18 @@ class StintDataset:
         )
 
     def describe(self) -> str:
+        """Human-readable summary: size, stint lengths, pace loss and compounds."""
         if not self.stints:
             return "Empty dataset"
-        lens = np.array([s.n_laps for s in self.stints])
+        lengths = np.array([s.n_laps for s in self.stints])
         deltas = np.concatenate([s.delta for s in self.stints])
-        comps: dict[str, int] = {}
-        for s in self.stints:
-            comps[s.compound] = comps.get(s.compound, 0) + 1
-        comp_txt = ", ".join(f"{k}:{v}" for k, v in sorted(comps.items()))
+        compounds = Counter(s.compound for s in self.stints)
+        compounds_txt = ", ".join(f"{name}:{count}" for name, count in sorted(compounds.items()))
         return (
             f"Source: {self.source} | stints: {len(self.stints)} | laps: {self.n_laps}\n"
-            f"  Stint length:  min={lens.min()} med={np.median(lens):.0f} max={lens.max()}\n"
+            f"  Stint length:  min={lengths.min()} med={np.median(lengths):.0f} max={lengths.max()}\n"
             f"  Pace loss:     min={deltas.min():.2f}s med={np.median(deltas):.2f}s max={deltas.max():.2f}s\n"
-            f"  Compounds: {comp_txt}"
+            f"  Compounds: {compounds_txt}"
         )
 
 
@@ -164,18 +174,17 @@ def aggregate_context_by_race(
     deviation does correlate with degradation (r = -0.203, significant), so
     averaging it would throw away real signal.
     """
-    key = key or (lambda s: s.stint_id[:3])
-    idx = [CONTEXT_NAMES.index(f) for f in fields]
+    race_of = key or (lambda s: s.stint_id[:3])
+    columns = [CONTEXT_NAMES.index(f) for f in fields]
 
-    groups: dict[str, list[Stint]] = {}
+    races: dict[str, list[Stint]] = defaultdict(list)
     for stint in data.stints:
-        groups.setdefault(key(stint), []).append(stint)
+        races[race_of(stint)].append(stint)
 
-    for members in groups.values():
-        medians = np.median(np.vstack([s.context for s in members]), axis=0)
-        for stint in members:
-            for i in idx:
-                stint.context[i] = medians[i]
+    for race_stints in races.values():
+        medians = np.median(np.vstack([s.context for s in race_stints]), axis=0)
+        for stint in race_stints:
+            stint.context[columns] = medians[columns]
 
     meta = dict(data.meta, context_aggregated=list(fields))
     return StintDataset(data.stints, data.source, meta)

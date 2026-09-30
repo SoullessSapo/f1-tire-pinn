@@ -62,12 +62,29 @@ def _monotonicity_violation(delta: np.ndarray, tol: float = 1e-3) -> tuple[int, 
     """Count lap-to-lap steps where pace *improves* by more than `tol`.
 
     A tire only degrades: any sustained improvement is a thermodynamically
-    impossible prediction.
+    impossible prediction. Returns (violating steps, total steps).
     """
     if delta.size < 2:
         return 0, 0
     diffs = np.diff(np.asarray(delta, dtype=float))
     return int((diffs < -tol).sum()), int(diffs.size)
+
+
+@dataclass
+class _ViolationTally:
+    """Running count of monotonicity violations over many predicted curves."""
+
+    violations: int = 0
+    steps: int = 0
+
+    def add(self, curve: np.ndarray) -> None:
+        bad, total = _monotonicity_violation(curve)
+        self.violations += bad
+        self.steps += total
+
+    @property
+    def rate(self) -> float:
+        return self.violations / self.steps if self.steps else 0.0
 
 
 def _true_cliff(stint: Stint, phys: PhysicsConfig) -> float | None:
@@ -89,40 +106,37 @@ def evaluate(
     extrapolation_horizon: int | None = None,
 ) -> Metrics:
     """Measure any model exposing `predict_stint(context, laps)`."""
-    extrapolation_horizon = extrapolation_horizon or phys.strategy_horizon
+    horizon = np.arange(1, (extrapolation_horizon or phys.strategy_horizon) + 1)
+
+    def predict(stint: Stint, laps: np.ndarray) -> np.ndarray:
+        return np.asarray(predict_stint(stint.context, laps), dtype=float).ravel()
+
     errors: list[np.ndarray] = []
-    cliff_errors: list[float] = []
     per_stint: dict[str, float] = {}
-    viol, viol_total = 0, 0
-    ex_viol, ex_total = 0, 0
-    detected = 0
-    total_with_cliff = 0
+    inside = _ViolationTally()  # within the observed laps
+    beyond = _ViolationTally()  # extrapolating out to the horizon
+    cliff_errors: list[float] = []
+    stints_with_cliff = 0
 
     for stint in data.stints:
-        pred = np.asarray(predict_stint(stint.context, stint.laps), dtype=float).ravel()
+        # Accuracy, on the laps that were actually observed.
+        pred = predict(stint, stint.laps)
         err = pred - stint.delta
         errors.append(err)
         per_stint[stint.stint_id] = float(np.sqrt(np.mean(err**2)))
-
-        v, t = _monotonicity_violation(pred)
-        viol += v
-        viol_total += t
+        inside.add(pred)
 
         # Extrapolation: the model is asked for the full stint out to the
         # horizon, beyond what it saw. This is where physics shows.
-        horizon = np.arange(1, extrapolation_horizon + 1)
-        pred_long = np.asarray(predict_stint(stint.context, horizon), dtype=float).ravel()
-        v, t = _monotonicity_violation(pred_long)
-        ex_viol += v
-        ex_total += t
+        pred_long = predict(stint, horizon)
+        beyond.add(pred_long)
 
         truth = _true_cliff(stint, phys)
         if truth is not None:
-            total_with_cliff += 1
-            got = cliff_lap(horizon, pred_long, phys)
-            if got is not None:
-                detected += 1
-                cliff_errors.append(abs(got - truth))
+            stints_with_cliff += 1
+            found = cliff_lap(horizon, pred_long, phys)
+            if found is not None:
+                cliff_errors.append(abs(found - truth))
 
     all_err = np.concatenate(errors)
     return Metrics(
@@ -131,10 +145,10 @@ def evaluate(
         mae=float(np.mean(np.abs(all_err))),
         max_error=float(np.max(np.abs(all_err))),
         cliff_mae=float(np.mean(cliff_errors)) if cliff_errors else None,
-        cliff_detected=detected,
-        cliff_total=total_with_cliff,
-        violation_rate=viol / viol_total if viol_total else 0.0,
-        extrap_violation_rate=ex_viol / ex_total if ex_total else 0.0,
+        cliff_detected=len(cliff_errors),
+        cliff_total=stints_with_cliff,
+        violation_rate=inside.rate,
+        extrap_violation_rate=beyond.rate,
         n_laps=int(all_err.size),
         per_stint=per_stint,
     )
@@ -149,15 +163,16 @@ def parameter_recovery(
     on the synthetic bench: with real data there is no ground truth.
     """
     rows = []
-    for n in names:
-        est = float(getattr(learned, n))
-        ref = float(getattr(truth, n))
-        rel = 100.0 * abs(est - ref) / abs(ref) if ref else float("nan")
-        rows.append((n, est, ref, rel))
+    for name in names:
+        estimated = float(getattr(learned, name))
+        true = float(getattr(truth, name))
+        rel_error = 100.0 * abs(estimated - true) / abs(true) if true else float("nan")
+        rows.append((name, estimated, true, rel_error))
     return rows
 
 
 def format_report(metrics: list[Metrics]) -> str:
+    """Fixed-width comparison table, one row per model, plus a legend."""
     lines = [HEADER, "-" * len(HEADER)]
     lines.extend(m.as_row() for m in metrics)
     lines.append("")

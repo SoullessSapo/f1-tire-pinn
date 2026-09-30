@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 import numpy as np
 
 from tirepinn.config import COMPOUND_INDEX, Config
+from tirepinn.dataset import stint_inputs
 from tirepinn.physics import cliff_lap, pace_loss
 from tirepinn.pinn import TirePINN
 
@@ -43,27 +44,8 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    model_dir = Path(args.model)
-    if not (model_dir / "pinn_weights.pt").exists():
-        print(f"No model found in {model_dir.resolve()}. Run run_train.py first")
-        return 1
-
-    pinn = TirePINN.load(model_dir, Config())
-    context = np.array(
-        [args.q_fric, args.load, args.speed, args.track_temp, COMPOUND_INDEX[args.compound]]
-    )
-    laps = np.arange(1, args.horizon + 1, dtype=float)
-    x = np.hstack(
-        [(laps / pinn.cfg.physics.lap_ref).reshape(-1, 1), np.tile(context, (laps.size, 1))]
-    )
-
-    y = pinn.forward_numpy(x)
-    theta, d = y[:, 0], y[:, 1]
-    delta = pace_loss(d, pinn.learned_params())
-    cliff = cliff_lap(laps, delta, pinn.cfg.physics)
-
+def print_curve(args: argparse.Namespace, laps, theta, d, delta, cliff) -> None:
+    """Predicted stint every five laps, plus the cliff and remaining useful life."""
     print("=" * 62)
     print(f"Compound {args.compound} | track {args.track_temp:.2f} | load {args.load:.2f}")
     print("=" * 62)
@@ -79,14 +61,39 @@ def main() -> int:
         print(f"Cliff expected on lap {cliff:.0f} of the stint.")
         print(f"Remaining useful life (RUL): {rul:.0f} laps from lap {args.current_lap:.0f}.")
 
-    # --- model latency ---
+
+def measure_latency(pinn: TirePINN, x: np.ndarray, repetitions: int) -> np.ndarray:
+    """Wall time of `repetitions` forward passes over `x`, in milliseconds."""
     pinn.forward_numpy(x)  # warm-up
     times = []
-    for _ in range(args.bench):
+    for _ in range(repetitions):
         t0 = time.perf_counter()
         pinn.forward_numpy(x)
         times.append((time.perf_counter() - t0) * 1000.0)
-    times = np.array(times)
+    return np.array(times)
+
+
+def main() -> int:
+    args = parse_args()
+    model_dir = Path(args.model)
+    if not (model_dir / "pinn_weights.pt").exists():
+        print(f"No model found in {model_dir.resolve()}. Run run_train.py first")
+        return 1
+
+    pinn = TirePINN.load(model_dir, Config())
+    context = np.array(
+        [args.q_fric, args.load, args.speed, args.track_temp, COMPOUND_INDEX[args.compound]]
+    )
+    laps = np.arange(1, args.horizon + 1, dtype=float)
+    x = stint_inputs(laps, context, pinn.cfg.physics)
+
+    y = pinn.forward_numpy(x)
+    theta, d = y[:, 0], y[:, 1]
+    delta = pace_loss(d, pinn.learned_params())
+    cliff = cliff_lap(laps, delta, pinn.cfg.physics)
+    print_curve(args, laps, theta, d, delta, cliff)
+
+    times = measure_latency(pinn, x, args.bench)
     print()
     print(
         f"Inference latency ({args.horizon} laps per call, {args.bench} repetitions): "

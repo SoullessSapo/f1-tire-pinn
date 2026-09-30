@@ -195,32 +195,37 @@ def integrate_stint(
         theta: thermal excess at the end of each lap.
         d: accumulated degradation at the end of each lap.
     """
-    q, lam, v, trk, comp = (float(c) for c in context)
+    q, lam, v, track_temp, compound = (float(c) for c in context)
     dt = 1.0 / (phys.lap_ref * steps_per_lap)
 
-    def f(state):
-        th, dd = state
+    def rhs(state: np.ndarray) -> np.ndarray:
+        theta, d = state
         return np.array(
             [
-                theta_rhs(th, dd, q, v, p),
-                wear_rate(th, dd, lam, trk, comp, p, phys.exp_clamp),
+                theta_rhs(theta, d, q, v, p),
+                wear_rate(theta, d, lam, track_temp, compound, p, phys.exp_clamp),
             ]
         )
 
-    state = np.array([phys.theta_init, 0.0])
-    theta_out, d_out = [], []
+    state = np.array([phys.theta_init, 0.0])  # (theta, d) leaving the pits
+    theta_per_lap, d_per_lap = [], []
     for _ in range(n_laps):
         for _ in range(steps_per_lap):
-            k1 = f(state)
-            k2 = f(state + 0.5 * dt * k1)
-            k3 = f(state + 0.5 * dt * k2)
-            k4 = f(state + dt * k3)
-            state = state + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        theta_out.append(state[0])
-        d_out.append(state[1])
+            state = _rk4_step(rhs, state, dt)
+        theta_per_lap.append(state[0])
+        d_per_lap.append(state[1])
 
     laps = np.arange(1, n_laps + 1, dtype=float)
-    return laps, np.asarray(theta_out), np.asarray(d_out)
+    return laps, np.asarray(theta_per_lap), np.asarray(d_per_lap)
+
+
+def _rk4_step(rhs, state: np.ndarray, dt: float) -> np.ndarray:
+    """One classic fourth-order Runge-Kutta step of size dt."""
+    k1 = rhs(state)
+    k2 = rhs(state + 0.5 * dt * k1)
+    k3 = rhs(state + 0.5 * dt * k2)
+    k4 = rhs(state + dt * k3)
+    return state + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
 # --------------------------------------------------------------------------
@@ -254,16 +259,26 @@ def cliff_lap(
     if laps.size < 3:
         return None
     if smooth and delta.size >= 5:
-        kernel = np.ones(3) / 3.0
-        padded = np.pad(delta, 1, mode="edge")
-        delta = np.convolve(padded, kernel, mode="valid")
+        delta = _moving_average_3(delta)
 
-    hot = np.gradient(delta, laps) >= phys.cliff_slope_s_per_lap
+    steep = np.gradient(delta, laps) >= phys.cliff_slope_s_per_lap
+    start = _first_run_start(steep, phys.cliff_min_run)
+    return None if start is None else float(laps[start])
+
+
+def _moving_average_3(values: np.ndarray) -> np.ndarray:
+    """Three-point moving average that keeps the length, repeating the edges."""
+    padded = np.pad(values, 1, mode="edge")
+    return np.convolve(padded, np.ones(3) / 3.0, mode="valid")
+
+
+def _first_run_start(mask: np.ndarray, min_run: int) -> int | None:
+    """Index where the first run of at least `min_run` consecutive True values starts."""
     run = 0
-    for i, is_hot in enumerate(hot):
-        run = run + 1 if is_hot else 0
-        if run >= phys.cliff_min_run:
-            return float(laps[i - phys.cliff_min_run + 1])
+    for i, value in enumerate(mask):
+        run = run + 1 if value else 0
+        if run >= min_run:
+            return i - min_run + 1
     return None
 
 

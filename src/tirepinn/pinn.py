@@ -69,7 +69,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import INPUT_DIM, LEARNABLE_PARAMS, OUTPUT_DIM, Config
-from .dataset import StintDataset, input_bounds
+from .dataset import StintDataset, input_bounds, stint_inputs
 from .physics import (
     TireParams,
     pace_loss,
@@ -83,7 +83,7 @@ LEARNABLE = LEARNABLE_PARAMS
 
 
 def _to_raw(name: str, value: float, cfg) -> float:
-    """From a physical value to the unconstrained variable the network optimises.
+    """From a physical value to the unconstrained ("raw") variable the optimiser sees.
 
     Two regimes, chosen per parameter by whether it declares `<name>_bounds`:
 
@@ -103,7 +103,10 @@ def _to_raw(name: str, value: float, cfg) -> float:
 
 
 def _from_raw(name: str, raw, cfg):
-    """Inverse of `_to_raw`. Works with numpy scalars and with tensors."""
+    """Inverse of `_to_raw`: raw variable back to physical units.
+
+    Works on plain floats (reporting) and on tensors (inside the autograd graph).
+    """
     bounds = getattr(cfg, f"{name}_bounds", None)
     is_tensor = torch.is_tensor(raw)
     if bounds is None:
@@ -112,6 +115,16 @@ def _from_raw(name: str, raw, cfg):
     if is_tensor:
         return lo + (hi - lo) * torch.sigmoid(raw)
     return float(lo + (hi - lo) / (1.0 + np.exp(-raw)))
+
+
+def _split_context(x):
+    """Context columns of the network input, as (q, lam, v, track_temp, compound)."""
+    return tuple(x[:, i : i + 1] for i in range(1, INPUT_DIM))
+
+
+def _split_state(y):
+    """Network output columns, as (theta, d)."""
+    return y[:, 0:1], y[:, 1:2]
 
 
 class TirePINN:
@@ -123,8 +136,8 @@ class TirePINN:
         self.net: dde.nn.NN | None = None
         self.loss_history = None
         self.var_history: list[tuple[int, dict[str, float]]] = []
-        self._log_vars: dict[str, torch.Tensor] = {}
-        self._fixed: dict[str, float] = {}
+        self._raw_vars: dict[str, torch.Tensor] = {}  # free parameters, unconstrained
+        self._fixed: dict[str, float] = {}  # parameters held at their initial value
         self._bounds: tuple[list[float], list[float]] | None = None
         self._has_theta_obs = False
 
@@ -145,14 +158,16 @@ class TirePINN:
         free = set(self.cfg.pinn.free_params) | ({"A_gen"} if phys.train_A_gen else set())
         inits = self._param_inits()
 
-        self._log_vars = {
-            k: dde.Variable(_to_raw(k, v, phys)) for k, v in inits.items() if k in free
+        self._raw_vars = {
+            name: dde.Variable(_to_raw(name, value, phys))
+            for name, value in inits.items()
+            if name in free
         }
-        self._fixed = {k: v for k, v in inits.items() if k not in free}
+        self._fixed = {name: value for name, value in inits.items() if name not in free}
 
     @property
     def trainable_variables(self) -> list[torch.Tensor]:
-        return list(self._log_vars.values())
+        return list(self._raw_vars.values())
 
     def _dtype(self):
         """Numeric type the network expects.
@@ -163,42 +178,27 @@ class TirePINN:
         return np.float64 if self.cfg.pinn.float64 else np.float32
 
     def _params_tensor(self) -> TireParams:
-        """Parameters as torch tensors, for the autograd graph."""
-        phys = self.cfg.physics
-        get = lambda k: (  # noqa: E731
-            _from_raw(k, self._log_vars[k], phys) if k in self._log_vars else self._fixed[k]
-        )
-        a_gen = get("A_gen") if "A_gen" in self._log_vars else phys.A_gen
-        return TireParams(
-            A_gen=a_gen,
-            zeta=get("zeta"),
-            h0=get("h0"),
-            h1=get("h1"),
-            kw=get("kw"),
-            m=get("m"),
-            Ea=get("Ea"),
-            kappa=get("kappa"),
-            gamma1=get("gamma1"),
-            gamma2=get("gamma2"),
-            p=phys.cliff_exponent,
+        """Parameters as torch tensors, so the residuals stay differentiable."""
+        return self._assemble_params(
+            {name: _from_raw(name, raw, self.cfg.physics) for name, raw in self._raw_vars.items()}
         )
 
     def learned_params(self) -> TireParams:
-        """Estimated parameters, as numpy scalars."""
+        """Estimated parameters, as plain floats."""
+        return self._assemble_params(
+            {
+                name: _from_raw(name, raw.item(), self.cfg.physics)
+                for name, raw in self._raw_vars.items()
+            }
+        )
+
+    def _assemble_params(self, free_values: dict) -> TireParams:
+        """Complete parameter set: the free values given, plus every fixed one."""
         phys = self.cfg.physics
-        vals = dict(self._fixed)
-        vals.update({k: _from_raw(k, v.item(), phys) for k, v in self._log_vars.items()})
+        values = {**self._fixed, **free_values}
         return TireParams(
-            A_gen=vals.get("A_gen", phys.A_gen),
-            zeta=vals["zeta"],
-            h0=vals["h0"],
-            h1=vals["h1"],
-            kw=vals["kw"],
-            m=vals["m"],
-            Ea=vals["Ea"],
-            kappa=vals["kappa"],
-            gamma1=vals["gamma1"],
-            gamma2=vals["gamma2"],
+            A_gen=values.get("A_gen", phys.A_gen),
+            **{name: values[name] for name in LEARNABLE},
             p=phys.cliff_exponent,
         )
 
@@ -210,31 +210,35 @@ class TirePINN:
         phys = self.cfg.physics
         p = self._params_tensor()
 
-        q, lam, v, trk, comp = (x[:, i : i + 1] for i in range(1, INPUT_DIM))
-        theta, d = y[:, 0:1], y[:, 1:2]
+        q, lam, v, track_temp, compound = _split_context(x)
+        theta, d = _split_state(y)
 
-        # Derivatives with respect to tau (input dimension 0).
+        # Derivatives of each output (i) with respect to tau (input column j=0).
         dtheta_dtau = dde.grad.jacobian(y, x, i=0, j=0)
         dd_dtau = dde.grad.jacobian(y, x, i=1, j=0)
 
         r_theta = dtheta_dtau - theta_rhs(theta, d, q, v, p)
-        r_wear = dd_dtau - wear_rate(theta, d, lam, trk, comp, p, phys.exp_clamp)
+        r_wear = dd_dtau - wear_rate(theta, d, lam, track_temp, compound, p, phys.exp_clamp)
         r_bound = F.relu(d - phys.d_max)
         return [r_theta, r_wear, r_bound]
 
     def _obs_delta(self, x, y, _):
         """Observation operator: from the latent state d to the pace loss."""
-        return pace_loss(y[:, 1:2], self._params_tensor())
+        _, d = _split_state(y)
+        return pace_loss(d, self._params_tensor())
 
     @staticmethod
     def _obs_theta(x, y, _):
-        return y[:, 0:1]
+        """Observation operator for the temperature proxy: theta itself."""
+        theta, _ = _split_state(y)
+        return theta
 
     def _output_transform(self, x, y):
         """Enforces theta(0) = theta_0, d(0) = 0 and d >= 0 exactly."""
         tau = x[:, 0:1]
-        theta = self.cfg.physics.theta_init + tau * y[:, 0:1]
-        d = tau * F.softplus(y[:, 1:2])
+        raw_theta, raw_d = _split_state(y)
+        theta = self.cfg.physics.theta_init + tau * raw_theta
+        d = tau * F.softplus(raw_d)
         return torch.cat([theta, d], dim=1)
 
     # ------------------------------------------------------------------
@@ -251,13 +255,10 @@ class TirePINN:
         """
         phys = self.cfg.physics
         n_tau = self.cfg.pinn.tau_collocation
-        tau_max = phys.strategy_horizon / phys.lap_ref
-        blocks = []
-        for stint in data.stints:
-            tau = np.linspace(0.0, tau_max, n_tau).reshape(-1, 1)
-            ctx = np.tile(stint.context.reshape(1, -1), (n_tau, 1))
-            blocks.append(np.hstack([tau, ctx]))
-        return np.vstack(blocks)
+        tau = np.linspace(0.0, phys.strategy_horizon / phys.lap_ref, n_tau).reshape(-1, 1)
+        return np.vstack(
+            [np.hstack([tau, np.tile(s.context.reshape(1, -1), (n_tau, 1))]) for s in data.stints]
+        )
 
     def build(self, data: StintDataset) -> None:
         """Assemble geometry, observation conditions, network and model."""
@@ -270,40 +271,45 @@ class TirePINN:
 
         lows, highs = input_bounds(data, phys)
         self._bounds = (lows, highs)
-        geom = dde.geometry.Hypercube(lows, highs)
-
-        # --- data term: measured pace loss ---
         x_obs = data.inputs(phys)
-        y_obs = data.delta()
-        bcs = [dde.icbc.PointSetOperatorBC(x_obs, y_obs, self._obs_delta)]
 
-        # --- optional data term: temperature proxy ---
-        theta_obs = data.theta_observations(phys) if cfg.pinn.use_theta_proxy else None
-        self._has_theta_obs = theta_obs is not None
-        if theta_obs is not None:
-            bcs.append(dde.icbc.PointSetOperatorBC(theta_obs[0], theta_obs[1], self._obs_theta))
-
-        anchors = np.vstack([self._collocation_anchors(data), x_obs])
         pde_data = dde.data.PDE(
-            geom,
+            dde.geometry.Hypercube(lows, highs),
             self._pde,
-            bcs,
+            self._observation_conditions(data, x_obs),
             num_domain=cfg.pinn.num_domain,
             num_boundary=0,
-            anchors=anchors,
+            anchors=np.vstack([self._collocation_anchors(data), x_obs]),
         )
-
-        layers = [INPUT_DIM, *cfg.pinn.hidden, OUTPUT_DIM]
-        self.net = dde.nn.FNN(layers, cfg.pinn.activation, cfg.pinn.initializer)
-        self.net.apply_output_transform(self._output_transform)
+        self.net = self._make_network(cfg.pinn.hidden, cfg.pinn.activation)
         self.model = dde.Model(pde_data, self.net)
 
+    def _observation_conditions(self, data: StintDataset, x_obs: np.ndarray) -> list:
+        """Data terms of the loss: measured pace loss, plus the optional thermal proxy."""
+        conditions = [dde.icbc.PointSetOperatorBC(x_obs, data.delta(), self._obs_delta)]
+
+        theta_obs = None
+        if self.cfg.pinn.use_theta_proxy:
+            theta_obs = data.theta_observations(self.cfg.physics)
+        self._has_theta_obs = theta_obs is not None
+        if theta_obs is not None:
+            x_theta, y_theta = theta_obs
+            conditions.append(dde.icbc.PointSetOperatorBC(x_theta, y_theta, self._obs_theta))
+        return conditions
+
+    def _make_network(self, hidden, activation: str) -> dde.nn.FNN:
+        """Fully connected network with the hard initial conditions attached."""
+        net = dde.nn.FNN([INPUT_DIM, *hidden, OUTPUT_DIM], activation, self.cfg.pinn.initializer)
+        net.apply_output_transform(self._output_transform)
+        return net
+
     def _loss_weights(self) -> list[float]:
+        """One weight per loss term, in the order DeepXDE reports them (L1..L5)."""
         c = self.cfg.pinn
-        w = [c.w_pde_theta, c.w_pde_wear, c.w_bound, c.w_data_delta]
+        weights = [c.w_pde_theta, c.w_pde_wear, c.w_bound, c.w_data_delta]
         if self._has_theta_obs:
-            w.append(c.w_data_theta)
-        return w
+            weights.append(c.w_data_theta)
+        return weights
 
     # ------------------------------------------------------------------
     # Training
@@ -325,6 +331,7 @@ class TirePINN:
             precision=6,
         )
 
+        # Phase 1: Adam explores.
         self.model.compile(
             "adam",
             lr=cfg.lr,
@@ -337,6 +344,7 @@ class TirePINN:
             callbacks=[var_cb],
         )
 
+        # Phase 2: L-BFGS refines. The thermal coefficients only converge here.
         if cfg.lbfgs_iters > 0:
             dde.optimizers.config.set_LBFGS_options(maxiter=cfg.lbfgs_iters)
             self.model.compile(
@@ -354,28 +362,35 @@ class TirePINN:
 
         DeepXDE writes lines of the form `<iteration> [v1, v2, ...]`, where the
         values are the unconstrained variables the network optimises; here they
-        are mapped back into physical units.
+        are mapped back into physical units. An unreadable file yields an empty
+        history rather than an error: the trace is a diagnostic, not a result.
         """
-        phys = self.cfg.physics
-        names = list(self._log_vars)
+        names = list(self._raw_vars)
         history: list[tuple[int, dict[str, float]]] = []
         try:
             with open(path, encoding="utf-8") as fh:
                 for line in fh:
-                    step_txt, _, vals_txt = line.strip().partition(" ")
-                    vals_txt = vals_txt.strip().strip("[]")
-                    if not vals_txt:
-                        continue
-                    vals = [float(v) for v in vals_txt.split(",")]
-                    history.append(
-                        (
-                            int(step_txt),
-                            {n: _from_raw(n, v, phys) for n, v in zip(names, vals, strict=False)},
-                        )
-                    )
+                    entry = self._parse_variable_line(line, names)
+                    if entry is not None:
+                        history.append(entry)
         except (OSError, ValueError):
             history = []
         self.var_history = history
+
+    def _parse_variable_line(
+        self, line: str, names: list[str]
+    ) -> tuple[int, dict[str, float]] | None:
+        """One `<iteration> [v1, v2, ...]` line, in physical units. None if it has no values."""
+        step_txt, _, values_txt = line.strip().partition(" ")
+        values_txt = values_txt.strip().strip("[]")
+        if not values_txt:
+            return None
+        raw_values = [float(v) for v in values_txt.split(",")]
+        physical = {
+            name: _from_raw(name, raw, self.cfg.physics)
+            for name, raw in zip(names, raw_values, strict=False)
+        }
+        return int(step_txt), physical
 
     # ------------------------------------------------------------------
     # Inference
@@ -398,11 +413,8 @@ class TirePINN:
 
     def predict_curve(self, context: np.ndarray, laps: np.ndarray) -> dict[str, np.ndarray]:
         """Full stint prediction: temperature, wear and pace."""
-        phys = self.cfg.physics
         laps = np.asarray(laps, dtype=float).ravel()
-        tau = (laps / phys.lap_ref).reshape(-1, 1)
-        ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))
-        theta, d = self.predict(np.hstack([tau, ctx]))
+        theta, d = self.predict(stint_inputs(laps, context, self.cfg.physics))
         delta = pace_loss(d, self.learned_params())
         return {"laps": laps, "theta": theta, "d": d, "delta": delta}
 
@@ -459,14 +471,12 @@ class TirePINN:
 
         obj = cls(cfg)
         obj._init_variables()
-        for name, value in payload["params"].items():
-            if name in obj._log_vars:
-                with torch.no_grad():
-                    obj._log_vars[name].fill_(_to_raw(name, value, cfg.physics))
+        with torch.no_grad():
+            for name, value in payload["params"].items():
+                if name in obj._raw_vars:
+                    obj._raw_vars[name].fill_(_to_raw(name, value, cfg.physics))
 
-        layers = [INPUT_DIM, *payload["hidden"], OUTPUT_DIM]
-        obj.net = dde.nn.FNN(layers, payload["activation"], cfg.pinn.initializer)
-        obj.net.apply_output_transform(obj._output_transform)
+        obj.net = obj._make_network(payload["hidden"], payload["activation"])
         obj.net.load_state_dict(torch.load(out_dir / "pinn_weights.pt", map_location="cpu"))
         obj.net.eval()
         obj._bounds = payload.get("bounds")

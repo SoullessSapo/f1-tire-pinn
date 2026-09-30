@@ -23,7 +23,7 @@ import torch
 from torch import nn
 
 from .config import PhysicsConfig
-from .dataset import StintDataset
+from .dataset import StintDataset, stint_inputs
 
 
 class LinearDegBaseline:
@@ -49,12 +49,9 @@ class LinearDegBaseline:
         return np.hstack([np.ones_like(tau), tau, tau**2, ctx, tau * ctx])
 
     def fit(self, data: StintDataset) -> LinearDegBaseline:
-        rows, targets = [], []
-        for stint in data.stints:
-            rows.append(self._features(stint.tau(self.phys), stint.context))
-            targets.append(stint.delta)
-        x = np.vstack(rows)
-        y = np.concatenate(targets)
+        """Closed-form ridge solution over every lap of every stint."""
+        x = np.vstack([self._features(s.tau(self.phys), s.context) for s in data.stints])
+        y = np.concatenate([s.delta for s in data.stints])
         gram = x.T @ x + self.ridge * np.eye(x.shape[1])
         self.coef_ = np.linalg.solve(gram, x.T @ y)
         return self
@@ -67,6 +64,8 @@ class LinearDegBaseline:
 
 
 class _LSTMNet(nn.Module):
+    """LSTM over the lap sequence, with a linear head giving pace loss per lap."""
+
     def __init__(self, n_features: int, hidden: int, layers: int):
         super().__init__()
         self.lstm = nn.LSTM(n_features, hidden, num_layers=layers, batch_first=True)
@@ -105,12 +104,16 @@ class LSTMBaseline:
         self.history: list[float] = []
 
     def _sequences(self, data: StintDataset) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Pack the stints into a padded tensor plus a validity mask."""
-        max_len = max(s.n_laps for s in data.stints)
-        n_feat = 1 + data.stints[0].context.size
-        x = np.zeros((len(data.stints), max_len, n_feat), dtype=np.float32)
-        y = np.zeros((len(data.stints), max_len), dtype=np.float32)
-        mask = np.zeros((len(data.stints), max_len), dtype=np.float32)
+        """Pack the stints into zero-padded tensors plus a mask of real laps.
+
+        Shapes: x (n_stints, max_laps, 6), y and mask (n_stints, max_laps).
+        """
+        n_stints = len(data.stints)
+        max_laps = max(s.n_laps for s in data.stints)
+        n_features = 1 + data.stints[0].context.size
+        x = np.zeros((n_stints, max_laps, n_features), dtype=np.float32)
+        y = np.zeros((n_stints, max_laps), dtype=np.float32)
+        mask = np.zeros((n_stints, max_laps), dtype=np.float32)
         for i, stint in enumerate(data.stints):
             n = stint.n_laps
             x[i, :n] = stint.inputs(self.phys).astype(np.float32)
@@ -138,9 +141,7 @@ class LSTMBaseline:
     def predict_stint(self, context: np.ndarray, laps: np.ndarray) -> np.ndarray:
         if self.net is None:
             raise RuntimeError("Fit the model before predicting")
-        laps = np.asarray(laps, dtype=float).ravel()
-        tau = (laps / self.phys.lap_ref).reshape(-1, 1)
-        ctx = np.tile(np.asarray(context, dtype=float).reshape(1, -1), (tau.shape[0], 1))
-        seq = np.hstack([tau, ctx]).astype(np.float32)[None, ...]
+        # A batch of one sequence: shape (1, n_laps, 6).
+        seq = stint_inputs(laps, context, self.phys).astype(np.float32)[None, ...]
         with torch.no_grad():
             return self.net(torch.from_numpy(seq)).numpy().ravel()
