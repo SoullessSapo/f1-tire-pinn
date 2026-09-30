@@ -83,6 +83,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_config(args: argparse.Namespace) -> Config:
+    """Translate the command line into a `Config`, applying the real-data defaults."""
     cfg = Config(out_dir=args.out)
     cfg.pinn.seed = args.seed
     cfg.pinn.adam_iters = 1200 if args.quick else args.adam
@@ -122,6 +123,7 @@ def build_config(args: argparse.Namespace) -> Config:
 
 
 def load_data(cfg: Config, args: argparse.Namespace):
+    """Synthetic bench, one real race, or several real races combined."""
     if cfg.data.source == "synthetic":
         from tirepinn import data_synthetic
 
@@ -139,6 +141,61 @@ def load_data(cfg: Config, args: argparse.Namespace):
     return data
 
 
+def train_models(cfg: Config, args: argparse.Namespace, train, out: Path) -> dict:
+    """Train the PINN and, unless disabled, fit the two baselines."""
+    print("[1/4] Training the PINN ...")
+    t0 = time.perf_counter()
+    pinn = TirePINN(cfg)
+    pinn.build(train)
+    pinn.train(out)
+    print(f"      done in {time.perf_counter() - t0:.1f} s\n")
+    models = {"PINN": pinn}
+
+    if args.no_baselines:
+        print("[2/4] Baselines skipped\n")
+        return models
+
+    print("[2/4] Fitting baselines ...")
+    models["Linear (classic)"] = LinearDegBaseline(cfg.physics).fit(train)
+    models["LSTM (black box)"] = LSTMBaseline(
+        cfg.physics, epochs=200 if args.quick else args.lstm_epochs, seed=args.seed
+    ).fit(train)
+    print("      done\n")
+    return models
+
+
+def parameter_recovery_table(pinn: TirePINN, free_params: tuple[str, ...]) -> str:
+    """Estimated vs true physical parameters. Only meaningful on the synthetic bench."""
+    rows = parameter_recovery(pinn.learned_params(), GROUND_TRUTH, free_params)
+    mean_error = np.mean([rel_error for *_, rel_error in rows])
+    lines = [
+        "",
+        "Physical parameter recovery (inverse problem)",
+        f"{'Parameter':10s} {'Estimated':>10s} {'True':>10s} {'Rel. error':>11s}",
+        "-" * 45,
+    ]
+    lines += [f"{n:10s} {est:10.4f} {ref:10.4f} {rel:10.1f}%" for n, est, ref, rel in rows]
+    lines.append(f"{'':10s} {'':>10s} {'mean':>10s} {mean_error:10.1f}%")
+    return "\n".join(lines)
+
+
+def save_figures(models: dict, pinn: TirePINN, test, cfg: Config, out: Path) -> None:
+    """Write the six figures of the report into `out`."""
+    synthetic = cfg.data.source == "synthetic"
+    loss_labels = ["Thermal ODE", "Wear ODE", "Bound d<=dmax", "Data: pace"]
+    if cfg.pinn.use_theta_proxy:
+        loss_labels.append("Data: temperature")
+
+    plots.plot_stint_grid(models, test, cfg.physics, out / "01_stints.png")
+    plots.plot_extrapolation(models, test, cfg.physics, out / "02_extrapolation.png")
+    plots.plot_latent_states(pinn, test, cfg.physics, out / "03_latent_states.png")
+    plots.plot_parameter_convergence(
+        pinn.var_history, GROUND_TRUTH if synthetic else None, out / "04_parameters.png"
+    )
+    plots.plot_loss_history(pinn.loss_history, out / "05_loss.png", loss_labels)
+    plots.plot_cliff_map(pinn, cfg.physics, out / "06_cliff_map.png")
+
+
 def main() -> int:
     args = parse_args()
     cfg = build_config(args)
@@ -154,28 +211,9 @@ def main() -> int:
     train, test = data.split(cfg.data.test_fraction, seed=args.seed)
     print(f"  Split by stint: {len(train)} train / {len(test)} test\n")
 
-    # ---------------------------------------------------------------- PINN --
-    print("[1/4] Training the PINN ...")
-    t0 = time.perf_counter()
-    pinn = TirePINN(cfg)
-    pinn.build(train)
-    pinn.train(out)
-    print(f"      done in {time.perf_counter() - t0:.1f} s\n")
+    models = train_models(cfg, args, train, out)
+    pinn = models["PINN"]
 
-    models = {"PINN": pinn}
-
-    # ----------------------------------------------------------- baselines --
-    if not args.no_baselines:
-        print("[2/4] Fitting baselines ...")
-        models["Linear (classic)"] = LinearDegBaseline(cfg.physics).fit(train)
-        models["LSTM (black box)"] = LSTMBaseline(
-            cfg.physics, epochs=200 if args.quick else args.lstm_epochs, seed=args.seed
-        ).fit(train)
-        print("      done\n")
-    else:
-        print("[2/4] Baselines skipped\n")
-
-    # ---------------------------------------------------------- evaluation --
     print("[3/4] Evaluating on unseen stints ...\n")
     metrics = [evaluate(name, m.predict_stint, test, cfg.physics) for name, m in models.items()]
     report = format_report(metrics)
@@ -183,37 +221,11 @@ def main() -> int:
 
     recovery_txt = ""
     if cfg.data.source == "synthetic":
-        rows = parameter_recovery(pinn.learned_params(), GROUND_TRUTH, cfg.pinn.free_params)
-        lines = [
-            "",
-            "Physical parameter recovery (inverse problem)",
-            f"{'Parameter':10s} {'Estimated':>10s} {'True':>10s} {'Rel. error':>11s}",
-            "-" * 45,
-        ]
-        lines += [f"{n:10s} {est:10.4f} {ref:10.4f} {rel:10.1f}%" for n, est, ref, rel in rows]
-        lines.append(
-            f"{'':10s} {'':>10s} {'mean':>10s} {np.mean([r[3] for r in rows]):10.1f}%"
-        )
-        recovery_txt = "\n".join(lines)
+        recovery_txt = parameter_recovery_table(pinn, cfg.pinn.free_params)
         print(recovery_txt)
 
-    # ------------------------------------------------------------- outputs --
     print("\n[4/4] Generating figures ...")
-    loss_labels = ["Thermal ODE", "Wear ODE", "Bound d<=dmax", "Data: pace"]
-    if cfg.pinn.use_theta_proxy:
-        loss_labels.append("Data: temperature")
-
-    plots.plot_stint_grid(models, test, cfg.physics, out / "01_stints.png")
-    plots.plot_extrapolation(models, test, cfg.physics, out / "02_extrapolation.png")
-    plots.plot_latent_states(pinn, test, cfg.physics, out / "03_latent_states.png")
-    plots.plot_parameter_convergence(
-        pinn.var_history,
-        GROUND_TRUTH if cfg.data.source == "synthetic" else None,
-        out / "04_parameters.png",
-    )
-    plots.plot_loss_history(pinn.loss_history, out / "05_loss.png", loss_labels)
-    plots.plot_cliff_map(pinn, cfg.physics, out / "06_cliff_map.png")
-
+    save_figures(models, pinn, test, cfg, out)
     pinn.save(out)
     cfg.to_json(str(out / "config.json"))
     with open(out / "report.txt", "w", encoding="utf-8") as fh:
