@@ -8,3 +8,6 @@ cache/
 
 # Directorios de pruebas rapidas (outputs/_quick, outputs/_verify, ...)
 outputs/_*/
+
+# Resultados de la interfaz grafica (python run_gui.py)
+outputs/gui/

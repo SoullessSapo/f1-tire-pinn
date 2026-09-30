@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 
 # Canonical order of the network input vector: (tau, context...)
 CONTEXT_NAMES = ("q_fric", "load", "speed", "track_temp", "compound")
@@ -243,3 +243,27 @@ class Config:
     def to_json(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(asdict(self), fh, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, path: str) -> Config:
+        """Inverse of `to_json`. Unknown keys are ignored, missing ones take defaults."""
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+
+        def build(kind, values: dict):
+            known = {f.name for f in fields(kind)}
+            return kind(
+                **{
+                    k: tuple(v) if isinstance(v, list) else v
+                    for k, v in values.items()
+                    if k in known
+                }
+            )
+
+        return cls(
+            physics=build(PhysicsConfig, raw.get("physics", {})),
+            pinn=build(PINNConfig, raw.get("pinn", {})),
+            data=build(DataConfig, raw.get("data", {})),
+            ranges=build(ContextRanges, raw.get("ranges", {})),
+            out_dir=raw.get("out_dir", "outputs"),
+        )

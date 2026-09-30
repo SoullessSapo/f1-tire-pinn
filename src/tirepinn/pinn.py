@@ -314,8 +314,12 @@ class TirePINN:
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
-    def train(self, out_dir: str | Path | None = None) -> None:
-        """Adam to explore, L-BFGS to refine. The standard regime for PINNs."""
+    def train(self, out_dir: str | Path | None = None, callbacks: list | None = None) -> None:
+        """Adam to explore, L-BFGS to refine. The standard regime for PINNs.
+
+        `callbacks` are extra DeepXDE callbacks run in both phases, e.g. to report
+        progress to a user interface.
+        """
         if self.model is None:
             raise RuntimeError("Call build() before train()")
         cfg = self.cfg.pinn
@@ -330,6 +334,7 @@ class TirePINN:
             filename=var_file,
             precision=6,
         )
+        all_callbacks = [var_cb, *(callbacks or [])]
 
         # Phase 1: Adam explores.
         self.model.compile(
@@ -341,7 +346,7 @@ class TirePINN:
         self.model.train(
             iterations=cfg.adam_iters,
             display_every=cfg.display_every,
-            callbacks=[var_cb],
+            callbacks=all_callbacks,
         )
 
         # Phase 2: L-BFGS refines. The thermal coefficients only converge here.
@@ -352,7 +357,7 @@ class TirePINN:
                 loss_weights=weights,
                 external_trainable_variables=self.trainable_variables,
             )
-            self.model.train(display_every=cfg.display_every, callbacks=[var_cb])
+            self.model.train(display_every=cfg.display_every, callbacks=all_callbacks)
 
         self.loss_history = self.model.losshistory
         self._read_variable_history(var_file)

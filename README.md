@@ -169,6 +169,32 @@ set DDE_BACKEND=pytorch
 
 ## 4. Usage
 
+### Graphical interface
+
+Everything below can also be done from a browser app, without the command line:
+
+```bash
+python run_gui.py          # or: streamlit run gui/app.py
+```
+
+It opens at `http://localhost:8501` with six tabs:
+
+| Tab | What it does |
+|---|---|
+| Datos | load the synthetic bench or FastF1 races; every stint's curve, the context distribution, a per-stint table (CSV download) and the hidden true states on the synthetic bench |
+| Entrenamiento | train the PINN and both baselines, with the loss terms, the physical parameters and the LSTM loss updating live; stop at any time |
+| Resultados | the metrics table, error and physical-violation charts, per-stint RMSE, learned parameters (with ground-truth recovery on the synthetic bench), and each test stint's prediction, extrapolation and latent states |
+| Estrategia | move the conditions and compound and get the wear curve, the lap at which `d` reaches `d_crit`, remaining life, a compound comparison and the decision map |
+| Figuras | the six report PNGs of any trained model |
+| Modelos guardados | reopen any model under `outputs/` to use it in *Estrategia* without retraining |
+
+The sidebar exposes the same options as `run_train.py` (plus learning rate,
+network size, collocation points and the data-term weight). It runs the same
+pipeline as the command line and writes the same files, to `outputs/gui` by
+default.
+
+### Command line
+
 Train on the synthetic bench (needs no network access and no API):
 
 ```bash
@@ -700,8 +726,13 @@ src/tirepinn/
   baselines.py       classic linear and LSTM
   evaluate.py        metrics
   plots.py           figures
+gui/
+  app.py             graphical interface (Streamlit)
+  job.py             background data loading and training for the interface
+  charts.py          interactive Plotly charts
 run_train.py         training + comparison + figures
 run_infer.py         inference and latency
+run_gui.py           opens the graphical interface
 ```
 
 A full walkthrough of the reasoning, the modelling choices and the four
