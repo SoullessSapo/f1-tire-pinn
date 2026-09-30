@@ -121,7 +121,12 @@ class LSTMBaseline:
             mask[i, :n] = 1.0
         return torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(mask)
 
-    def fit(self, data: StintDataset) -> LSTMBaseline:
+    def fit(self, data: StintDataset, on_epoch=None) -> LSTMBaseline:
+        """Train on whole stints.
+
+        `on_epoch(epoch, loss)` is called after every epoch; returning True stops
+        training early.
+        """
         torch.manual_seed(self.seed)
         x, y, mask = self._sequences(data)
         self.net = _LSTMNet(x.shape[-1], self.hidden, self.layers)
@@ -135,6 +140,8 @@ class LSTMBaseline:
             loss.backward()
             opt.step()
             self.history.append(float(loss.item()))
+            if on_epoch is not None and on_epoch(len(self.history), self.history[-1]):
+                break
         self.net.eval()
         return self
 

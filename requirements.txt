@@ -10,3 +10,7 @@ matplotlib>=3.7
 
 # Solo necesario para --source fastf1
 fastf1>=3.3
+
+# Interfaz gráfica (python run_gui.py)
+streamlit>=1.46
+plotly>=5.20
