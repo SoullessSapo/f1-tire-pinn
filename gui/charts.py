@@ -73,6 +73,8 @@ def _layout(fig: go.Figure, height: int = 420, title: str | None = None, **kwarg
         hovermode="x unified",
         legend=legend,
         font=dict(family="'Titillium Web', sans-serif"),
+        hoverlabel=dict(font=dict(family="'Titillium Web', sans-serif")),
+        barcornerradius=4,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         **kwargs,
@@ -471,5 +473,39 @@ def cliff_map(pinn, phys: PhysicsConfig, horizon: int, res: int = 24) -> go.Figu
     fig.update_yaxes(title="Carga mecánica (norm.)", row=1, col=1)
     fig = _layout(fig, 380, title=f"Mapa de decisión: vuelta en la que d alcanza d_crit "
                                   f"(en blanco = no se alcanza en {horizon} vueltas)")
+    fig.update_layout(hovermode="closest")
+    return fig
+
+
+# ----------------------------------------------------------------------
+# Race by race
+# ----------------------------------------------------------------------
+def race_grid(stints, models: dict, test_ids: set[str], cols: int = 3) -> go.Figure:
+    """Every stint of one race in its own panel: observed laps and each model."""
+    rows = int(np.ceil(len(stints) / cols))
+    titles = [
+        f"{s.stint_id} · {s.compound} · {'prueba' if s.stint_id in test_ids else 'entren.'}"
+        for s in stints
+    ]
+    fig = make_subplots(rows=rows, cols=cols, subplot_titles=titles,
+                        vertical_spacing=0.32 / max(rows, 1) + 0.04, horizontal_spacing=0.05)
+    for k, s in enumerate(stints):
+        r, c = k // cols + 1, k % cols + 1
+        fig.add_trace(
+            go.Scatter(x=s.laps, y=s.delta, mode="markers", name="Observado",
+                       legendgroup="obs", showlegend=k == 0,
+                       marker=dict(size=6, color=OBSERVED)),
+            row=r, col=c,
+        )
+        for name, model in models.items():
+            pred = np.asarray(model.predict_stint(s.context, s.laps)).ravel()
+            fig.add_trace(
+                go.Scatter(x=s.laps, y=pred, mode="lines", name=name, legendgroup=name,
+                           showlegend=k == 0,
+                           line=dict(width=2, color=MODEL_COLORS.get(name, "#4a3aa7"),
+                                     dash=MODEL_DASH.get(name, "solid"))),
+                row=r, col=c,
+            )
+    fig = _layout(fig, 250 * rows + 60, title="Todos los stints de la carrera")
     fig.update_layout(hovermode="closest")
     return fig

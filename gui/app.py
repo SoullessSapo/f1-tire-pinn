@@ -76,6 +76,21 @@ STYLE = """
 }
 .hero .chip.on { border-color: #e10600; background: rgba(225, 6, 0, 0.18); color: #ffffff; }
 .stTabs [data-baseweb="tab"] p { font-size: 1.02rem; font-weight: 600; }
+.empty {
+  text-align: center; padding: 2.6rem 1rem 2.2rem; margin: 0.4rem 0 1rem;
+  border: 1px dashed rgba(128, 128, 140, 0.45); border-radius: 0.8rem;
+}
+.empty .icon { font-size: 2.6rem; line-height: 1; margin-bottom: 0.6rem; }
+.empty h3 { margin: 0 0 0.3rem; padding: 0; font-size: 1.25rem; }
+.empty p { margin: 0 auto; max-width: 34rem; opacity: 0.75; }
+.tyre {
+  display: inline-block; padding: 0 0.6rem; border: 2px solid; border-radius: 999px;
+  font-size: 0.85rem; font-weight: 700; vertical-align: middle;
+}
+.brand { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.2rem; }
+.brand .bar { width: 6px; height: 2.1rem; border-radius: 3px; background: #e10600; }
+.brand .name { font-size: 1.35rem; font-weight: 700; line-height: 1.1; }
+.brand .sub { font-size: 0.82rem; opacity: 0.7; }
 </style>
 """
 
@@ -92,9 +107,11 @@ def _apply_preset() -> None:
 
 
 def sidebar() -> Settings:
-    sb = st.sidebar
-    sb.title("🏎️ F1 Tire PINN")
-    sb.caption("Degradación de neumáticos con una red neuronal informada por la física")
+    st.sidebar.markdown(
+        '<div class="brand"><div class="bar"></div><div><div class="name">🏎️ F1 Tire PINN</div>'
+        '<div class="sub">física + datos</div></div></div>',
+        unsafe_allow_html=True,
+    )
 
     sb = st.sidebar.container(border=True)
     sb.subheader("1 · Datos")
@@ -237,6 +254,20 @@ def phase_counter(job: Job) -> str:
     return f"L-BFGS {job.lbfgs_iteration:,} / {s.lbfgs_iters:,} (Adam terminado)"
 
 
+def empty(icon: str, title: str, text: str) -> None:
+    """Placeholder for a tab with nothing to show yet."""
+    st.markdown(
+        f'<div class="empty"><div class="icon">{icon}</div><h3>{title}</h3><p>{text}</p></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def compound_badge(compound: str) -> str:
+    color = charts.COMPOUND_COLORS.get(compound.upper(), charts.OBSERVED)
+    return (f'<span class="tyre" style="border-color:{color};color:{color}">'
+            f'● {compound.title()}</span>')
+
+
 def kpi(container, *args, **kwargs) -> None:
     """A metric in a card, so the numbers read as one row of tiles."""
     container.metric(*args, border=True, **kwargs)
@@ -273,8 +304,9 @@ def tab_data(settings: Settings) -> None:
                    "después se lee de la caché en `cache/`.")
 
     if data_entry is None:
-        st.info("Todavía no hay datos cargados. Pulsa **Cargar datos**, o directamente "
-                "**Entrenar** en la pestaña de entrenamiento (carga los datos por ti).")
+        empty("📥", "Todavía no hay datos",
+              "Pulsa <b>Cargar datos</b>, o directamente <b>Entrenar</b> en la pestaña de "
+              "entrenamiento: carga los datos por ti.")
         return
     key, data = data_entry
     if key != settings.data_key():
@@ -310,12 +342,22 @@ def tab_data(settings: Settings) -> None:
             "δ inicial [s]": float(s.delta[0]), "δ final [s]": float(s.delta[-1]),
             "δ máx [s]": float(s.delta.max()),
         }
+        row["Curva δ"] = [float(v) for v in s.delta]
         row.update({n: float(v) for n, v in zip(CONTEXT_NAMES, s.context, strict=False)})
         if test_ids is not None:
             row["Conjunto"] = "prueba" if s.stint_id in test_ids else "entrenamiento"
         rows.append(row)
     table = pd.DataFrame(rows)
-    st.dataframe(table, width="stretch", hide_index=True, height=320)
+    st.dataframe(
+        table, width="stretch", hide_index=True, height=320,
+        column_config={
+            "Curva δ": st.column_config.LineChartColumn("Curva δ", width="small"),
+            "δ máx [s]": st.column_config.ProgressColumn(
+                "δ máx [s]", format="%.2f", min_value=0.0,
+                max_value=float(max(deltas.max(), 1e-9)),
+            ),
+        },
+    )
 
     laps = pd.DataFrame([
         {"stint": s.stint_id, "piloto": s.driver, "compuesto": s.compound, "vuelta": int(lap),
@@ -355,8 +397,9 @@ def tab_train(settings: Settings) -> None:
     def _live():
         job: Job | None = ss.job
         if job is None or job.kind != "train":
-            st.info("Pulsa **Entrenar** para empezar. Las curvas de pérdida y los parámetros "
-                    "físicos se dibujan en vivo mientras la red aprende.")
+            empty("🧠", "Listo para entrenar",
+                  "Pulsa <b>Entrenar</b>. Las curvas de pérdida de Adam y L-BFGS y los "
+                  "parámetros físicos se dibujan en vivo mientras la red aprende.")
             return
         # The state itself is in the status bar at the top.
         k = st.columns(4)
@@ -368,9 +411,11 @@ def tab_train(settings: Settings) -> None:
             delta_color="off", delta_arrow="off")
         total = sum(job.loss_terms[-1]) if job.loss_terms else None
         first = sum(job.loss_terms[0]) if job.loss_terms else None
+        history = [float(np.log10(sum(t))) for t in job.loss_terms[: len(job.loss_steps)]]
         kpi(k[2], "Pérdida total", f"{total:.3e}" if total else "—",
-                    f"÷{first / total:,.0f} desde el inicio" if total and first else None,
-                    delta_color="normal", delta_arrow="down")
+            f"÷{first / total:,.0f} desde el inicio" if total and first else None,
+            delta_color="normal", delta_arrow="down",
+            chart_data=history if len(history) > 1 else None, chart_type="line")
         kpi(k[3], "Tiempo", fmt_seconds(job.elapsed))
 
         # The worker appends to these lists one after another; read a common prefix.
@@ -394,11 +439,15 @@ def tab_train(settings: Settings) -> None:
 def tab_results() -> None:
     res = ss.result
     if res is None:
-        st.info("Aquí aparecen las métricas y las predicciones cuando termine un entrenamiento.")
+        empty("📈", "Sin resultados todavía",
+              "Aquí aparecen las métricas, el diagnóstico y las predicciones cuando termine "
+              "un entrenamiento.")
         return
     phys = res.cfg.physics
     st.caption(f"Entrenado en {fmt_seconds(res.seconds)} · {len(res.train)} stints de "
                f"entrenamiento, {len(res.test)} de prueba · guardado en `{res.out_dir}`")
+
+    show_diagnosis(res)
 
     best = min(res.metrics, key=lambda m: m.rmse)
     cols = st.columns(len(res.metrics))
@@ -458,6 +507,198 @@ def tab_results() -> None:
     st.download_button("⬇️ Descargar informe", text, "report.txt")
 
 
+
+# ======================================================================
+# Race by race
+# ======================================================================
+def race_names(cfg: Config) -> dict[str, str]:
+    """Stint-id prefix -> race name, as `build_multi_dataset` builds the prefix."""
+    return {gp[:3].upper(): gp for gp in (cfg.data.gps or (cfg.data.gp,))}
+
+
+def race_of(stint, names: dict[str, str], fallback: str) -> str:
+    """Multi-race ids look like SAU-PIA-S1; single-race ids (PIA-S1) carry no race."""
+    parts = stint.stint_id.split("-")
+    if len(parts) >= 3:
+        return names.get(parts[0], parts[0])
+    return fallback
+
+
+def stint_errors(stint, models: dict) -> dict[str, float]:
+    """RMSE of each model over this stint's observed laps."""
+    out = {}
+    for name, model in models.items():
+        pred = np.asarray(model.predict_stint(stint.context, stint.laps)).ravel()
+        out[name] = float(np.sqrt(np.mean((pred - stint.delta) ** 2)))
+    return out
+
+
+def tab_races() -> None:
+    res = ss.result
+    if res is None:
+        empty("🔎", "Entrena un modelo para recorrer sus carreras",
+              "Aquí verás, carrera por carrera y stint por stint, cómo predice cada modelo.")
+        return
+    phys = res.cfg.physics
+    fallback = res.cfg.data.gp if res.cfg.data.source == "fastf1" else "Banco sintético"
+    names = race_names(res.cfg)
+    test_ids = {s.stint_id for s in res.test.stints}
+
+    by_race: dict[str, list] = {}
+    for s in res.data.stints:
+        by_race.setdefault(race_of(s, names, fallback), []).append(s)
+
+    c1, c2 = st.columns([3, 2])
+    race = c1.selectbox(
+        "Carrera", list(by_race),
+        format_func=lambda r: f"{r} · {len(by_race[r])} stints "
+                              f"({sum(s.stint_id in test_ids for s in by_race[r])} de prueba)",
+    )
+    which = c2.segmented_control(
+        "Stints", ["Todos", "Solo prueba", "Solo entrenamiento"], default="Todos",
+        key="race_which",
+    ) or "Todos"
+    stints = [
+        s for s in by_race[race]
+        if which == "Todos" or (s.stint_id in test_ids) == (which == "Solo prueba")
+    ]
+    if not stints:
+        st.info("Esta carrera no tiene stints de ese tipo.")
+        return
+    st.caption("Los stints **de prueba** no se usaron para entrenar: ahí se mide de verdad el modelo. "
+               "En los de **entrenamiento** la red ya vio esas vueltas, así que un buen ajuste ahí "
+               "no demuestra nada; un mal ajuste sí indica que no convergió.")
+
+    # one stint at a time, with previous / next
+    ids = [s.stint_id for s in stints]
+    key = f"race_idx_{race}_{which}"
+    ss.setdefault(key, 0)
+    ss[key] = min(ss[key], len(ids) - 1)
+    b1, b2, b3 = st.columns([1, 6, 1], vertical_alignment="bottom")
+    if b1.button("◀ Anterior", width="stretch", disabled=ss[key] == 0, key=f"{key}_prev"):
+        ss[key] -= 1
+        st.rerun()
+    if b3.button("Siguiente ▶", width="stretch", disabled=ss[key] == len(ids) - 1, key=f"{key}_next"):
+        ss[key] += 1
+        st.rerun()
+    chosen = b2.selectbox("Stint", ids, index=ss[key], key=f"{key}_sel",
+                          label_visibility="collapsed")
+    if ids.index(chosen) != ss[key]:
+        ss[key] = ids.index(chosen)
+        st.rerun()
+    stint = stints[ss[key]]
+
+    is_test = stint.stint_id in test_ids
+    st.markdown(
+        f"#### {stint.stint_id} &nbsp; {compound_badge(stint.compound)} &nbsp; "
+        + (":blue-badge[🧪 prueba · nunca visto]" if is_test else ":gray-badge[📚 entrenamiento]")
+        + f" &nbsp; :gray[{stint.driver} · {stint.n_laps} vueltas · {ss[key] + 1} de {len(ids)}]",
+        unsafe_allow_html=True,
+    )
+    errors = stint_errors(stint, res.models)
+    best = min(errors, key=errors.get)
+    k = st.columns(len(errors))
+    for col, (name, err) in zip(k, errors.items(), strict=False):
+        kpi(col, f"{'🏆 ' if name == best else ''}RMSE · {name}", f"{err:.3f} s")
+    horizon = max(phys.strategy_horizon, int(stint.laps.max()) + 5)
+    plot(st, charts.stint_predictions(stint, res.models, phys, horizon))
+    plot(st, charts.latent_states(res.models["PINN"], stint, phys, horizon))
+
+    st.subheader(f"Vista general · {race}")
+    plot(st, charts.race_grid(stints, res.models, test_ids))
+    table = pd.DataFrame([
+        {"Stint": s.stint_id, "Conjunto": "prueba" if s.stint_id in test_ids else "entrenamiento",
+         "Compuesto": s.compound, "Vueltas": s.n_laps,
+         **{f"RMSE {n} [s]": v for n, v in stint_errors(s, res.models).items()}}
+        for s in stints
+    ])
+    st.dataframe(table.style.format(precision=3), width="stretch", hide_index=True)
+
+
+# ======================================================================
+# Convergence diagnosis
+# ======================================================================
+def diagnose(res) -> list[tuple[str, str, str]]:
+    """Plain checks that catch a training run that did not converge.
+
+    Returns (level, title, explanation) with level "ok", "warn" or "bad".
+    """
+    out = []
+    cfg, phys = res.cfg, res.cfg.physics
+    pinn = res.models["PINN"]
+    params = pinn.learned_params().as_dict()
+    real = cfg.data.source == "fastf1"
+    metrics = {m.name: m for m in res.metrics}
+    p = metrics.get("PINN")
+
+    if cfg.pinn.adam_iters < 5000:
+        out.append(("warn", f"Entrenamiento corto: {cfg.pinn.adam_iters:,} iteraciones de Adam",
+                    "La física se impone poco a poco. Para resultados fiables usa el preajuste "
+                    "**Estándar** (15.000 + 3.000)."))
+
+    bounds = {"gamma1": phys.gamma1_bounds, "gamma2": phys.gamma2_bounds,
+              "kappa": phys.kappa_bounds}
+    pinned = [n for n, (lo, hi) in bounds.items() if n in cfg.pinn.free_params
+              and min(abs(params[n] - lo), abs(params[n] - hi)) < 0.02 * (hi - lo)]
+    if pinned:
+        out.append(("bad", f"Parámetros pegados a su límite: {', '.join(pinned)}",
+                    "El optimizador empujó estos coeficientes hasta su cota: la solución no es "
+                    "física. Con datos reales deja libres solo **kw** y **kappa**."))
+    if real and {"gamma1", "gamma2"} & set(cfg.pinn.free_params):
+        out.append(("warn", "gamma libre con datos reales",
+                    "La escala del desgaste no es identificable desde tiempos de vuelta "
+                    "(ver README): con gamma libre la pérdida máxima puede crecer sin control. "
+                    "Lo recomendado es estimar solo **kw** y **kappa**."))
+
+    delta_max = params["gamma1"] + params["gamma2"]
+    saturated = 0
+    for s in res.test.stints:
+        pred = np.asarray(pinn.predict_stint(s.context, s.laps)).ravel()
+        if pred.max() > 0.9 * delta_max and s.delta.max() < 0.5 * delta_max:
+            saturated += 1
+    if saturated:
+        out.append(("bad", f"La PINN predice un cliff que no existe en {saturated} de "
+                           f"{len(res.test.stints)} stints de prueba",
+                    f"La curva se dispara hasta su máximo ({delta_max:.1f} s) cuando los datos no "
+                    "pasan de la mitad. Señal típica de falta de entrenamiento o de parámetros "
+                    "mal identificados."))
+
+    lin = metrics.get("Linear (classic)")
+    if p and lin and p.rmse > lin.rmse:
+        out.append(("bad", f"La PINN ({p.rmse:.3f} s) es peor que la regresión lineal ({lin.rmse:.3f} s)",
+                    "Un modelo que no supera a una recta no ha aprendido la física."))
+    if p and p.violation_rate > 0.01:
+        out.append(("warn", f"{100 * p.violation_rate:.1f} % de vueltas donde el neumático «recupera» agarre",
+                    "Físicamente imposible: la red aún no respeta bien la ecuación de desgaste."))
+
+    if real:
+        obs = np.concatenate([s.delta for s in res.data.stints])
+        neg = float(np.mean(obs < -0.3))
+        if neg > 0.15:
+            out.append(("warn", f"{100 * neg:.0f} % de las vueltas observadas tienen pérdida negativa",
+                        "Tras corregir combustible y evolución de pista, muchas vueltas salen *más "
+                        "rápidas* que al inicio del stint. Ningún modelo de desgaste puede predecir "
+                        "eso: suele indicar una carrera con mucha gestión de neumáticos o tráfico."))
+    if not out:
+        out.append(("ok", "Sin señales de mala convergencia",
+                    "Parámetros dentro de sus límites, sin cliffs inventados y mejor que la "
+                    "regresión lineal."))
+    return out
+
+
+def show_diagnosis(res) -> None:
+    checks = diagnose(res)
+    worst = "bad" if any(c[0] == "bad" for c in checks) else (
+        "warn" if any(c[0] == "warn" for c in checks) else "ok")
+    label = {"ok": "✅ Diagnóstico: el entrenamiento parece sano",
+             "warn": "⚠️ Diagnóstico: revisa estos puntos",
+             "bad": "🚨 Diagnóstico: el modelo no convergió bien"}[worst]
+    with st.expander(label, expanded=worst != "ok"):
+        for level, title, text in checks:
+            box = {"ok": st.success, "warn": st.warning, "bad": st.error}[level]
+            box(f"**{title}**  \n{text}")
+
+
 def _available_models() -> list[Path]:
     base = ROOT / "outputs"
     return sorted({p.parent for p in base.rglob("pinn_weights.pt")}) if base.exists() else []
@@ -468,7 +709,8 @@ def tab_models() -> None:
              "en **Estrategia** sin volver a entrenar.")
     options = _available_models()
     if not options:
-        st.info("No hay modelos en `outputs/` todavía.")
+        empty("💾", "No hay modelos guardados",
+              "Cada entrenamiento se guarda en <code>outputs/</code> y aparecerá aquí.")
         return
     rel = [str(p.relative_to(ROOT)) for p in options]
     c1, c2 = st.columns([3, 1])
@@ -510,7 +752,8 @@ def _strategy_model():
 def tab_strategy() -> None:
     choices = _strategy_model()
     if not choices:
-        st.info("Entrena un modelo o carga uno en **Modelos guardados** para usar el simulador.")
+        empty("🏁", "Simulador de estrategia",
+              "Entrena un modelo o abre uno en <b>Modelos guardados</b> para usarlo aquí.")
         return
     name = st.radio("Modelo", list(choices), horizontal=True)
     pinn, cfg = choices[name]
@@ -572,7 +815,7 @@ def tab_figures() -> None:
         dirs.append(Path(ss.loaded["dir"]).resolve())
     dirs += [p for p in _available_models() if p.resolve() not in dirs]
     if not dirs:
-        st.info("Todavía no hay figuras. Aparecen al terminar un entrenamiento.")
+        empty("🖼️", "Todavía no hay figuras", "Aparecen al terminar un entrenamiento.")
         return
     labels = [str(p.relative_to(ROOT)) if p.is_relative_to(ROOT) else str(p) for p in dirs]
     folder = dirs[labels.index(st.selectbox("Carpeta", labels))]
@@ -607,8 +850,8 @@ def main() -> None:
     st.html(STYLE)
     header()
     status_bar()
-    tabs = st.tabs(["📊 Datos", "🧠 Entrenamiento", "📈 Resultados", "🏁 Estrategia",
-                    "🖼️ Figuras", "💾 Modelos guardados"])
+    tabs = st.tabs(["📊 Datos", "🧠 Entrenamiento", "📈 Resultados", "🔎 Carrera a carrera",
+                    "🏁 Estrategia", "🖼️ Figuras", "💾 Modelos guardados"])
     with tabs[0]:
         tab_data(settings)
     with tabs[1]:
@@ -616,10 +859,12 @@ def main() -> None:
     with tabs[2]:
         tab_results()
     with tabs[3]:
-        tab_strategy()
+        tab_races()
     with tabs[4]:
-        tab_figures()
+        tab_strategy()
     with tabs[5]:
+        tab_figures()
+    with tabs[6]:
         tab_models()
 
 
