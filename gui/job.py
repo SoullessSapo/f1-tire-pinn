@@ -58,6 +58,7 @@ class Settings:
     # practice sessions below and test on the race of the same weekends.
     split_mode: str = "random"
     practice_sessions: tuple[str, ...] = ("FP1", "FP2", "FP3")
+    practice_fresh_only: bool = False
 
     # training
     adam_iters: int = 15000
@@ -77,7 +78,7 @@ class Settings:
             return ("synthetic", self.n_stints, self.noise_delta_s, self.seed)
         return (
             "fastf1", self.year, self.gps, self.session, self.drivers, self.aggregate_context,
-            self.min_stint_laps, self.split_mode, self.practice_sessions,
+            self.min_stint_laps, self.split_mode, self.practice_sessions, self.practice_fresh_only,
         )
 
     @property
@@ -389,7 +390,8 @@ def _practice_to_race_data(cfg: Config, s: Settings) -> StintDataset:
     from tirepinn import data_fastf1
 
     train, test = data_fastf1.build_practice_to_race(
-        cfg.data, cfg.physics, s.gps, s.practice_sessions
+        cfg.data, cfg.physics, s.gps, s.practice_sessions,
+        practice_fresh_only=s.practice_fresh_only,
     )
     if s.aggregate_context:
         train = aggregate_context_by_race(train, s.aggregate_context)

@@ -206,7 +206,9 @@ With FastF1 data, *Cómo evaluar* offers two splits:
   is known before it is run: its compound, its length and the track
   temperature. Frictional energy, load and speed come from that circuit's
   practice median, so the race telemetry is never seen. Results then compare the
-  error on practice (seen) against the race (unseen). See
+  error on practice (seen) against the race (unseen). Practice keeps runs on
+  used sets by default (*Usar juegos ya usados en prácticas*): teams split each
+  set over several runs, and the fresh-only filter leaves almost nothing. See
   `data_fastf1.build_practice_to_race`.
 
 ### Command line

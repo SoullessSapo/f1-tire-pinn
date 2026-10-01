@@ -69,6 +69,13 @@ def render() -> Settings:
                      "tener las tandas largas con más combustible, las más parecidas a la "
                      "carrera. En fines de semana sprint solo hay FP1: las que falten se saltan.",
             )) or ("FP1", "FP2", "FP3")
+            s.practice_fresh_only = not sb.toggle(
+                "Usar juegos ya usados en prácticas", value=True,
+                help="Los equipos reparten cada juego en varias tandas: en prácticas casi todas "
+                     "son con neumáticos usados. Si se desactiva, solo quedan las primeras "
+                     "tandas de cada juego y puede no quedar ninguna. El precio: esas tandas "
+                     "empiezan con algo de desgaste, y el modelo supone d = 0 al inicio.",
+            )
         else:
             s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
         drivers = sb.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")
