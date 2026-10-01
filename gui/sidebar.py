@@ -80,6 +80,12 @@ def render() -> Settings:
             s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
         drivers = sb.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")
         s.drivers = tuple(d.upper() for d in drivers.split())
+        if 0 < len(s.drivers) < 3:
+            sb.warning(
+                "Con menos de 3 pilotos no se puede medir el efecto del combustible y de la "
+                "pista en cada carrera: se usa una corrección fija. Para entrenar conviene "
+                "dejarlo vacío (todos)."
+            )
         s.aggregate_context = tuple(sb.multiselect(
             "Colapsar a la mediana de la carrera", CONTEXT_NAMES, default=["q_fric", "load"],
             help="Estos proxies varían mucho dentro de un mismo circuito sin predecir nada: "

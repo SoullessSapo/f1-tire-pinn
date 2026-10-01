@@ -398,6 +398,14 @@ def _add_normalised_context(df: pd.DataFrame, cfg: DataConfig) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Step 3: race-lap correction (fuel burn + track evolution)
 # --------------------------------------------------------------------------
+# Below this many drivers `_estimate_race_lap_effect` is not identified. One car
+# runs each set at a single race-lap offset, so tire age and race lap move
+# together and the fit can split their sum any way it likes: on a simulated race
+# a single driver gives errors of +-3.5 s over 25 laps, against +-0.25 s with
+# two drivers and +-0.06 s with five.
+MIN_DRIVERS_FOR_ESTIMATE = 3
+
+
 def _race_lap_correction(df: pd.DataFrame, cfg: DataConfig, total_laps: int) -> np.ndarray:
     """Seconds to subtract from each lap time to remove the race-lap effect.
 
@@ -405,9 +413,16 @@ def _race_lap_correction(df: pd.DataFrame, cfg: DataConfig, total_laps: int) -> 
     looks like the opposite of degradation, and masks it entirely. By default the
     combined effect is measured per race (see `_estimate_race_lap_effect` for
     why the two parts cannot be separated and why one fixed number biases
-    circuits differently); the fixed fuel figure is only a fallback.
+    circuits differently); the fixed fuel figure is only a fallback, used too
+    when there are too few drivers to estimate the effect.
     """
-    if cfg.estimate_race_lap_effect:
+    n_drivers = df["driver"].nunique()
+    if cfg.estimate_race_lap_effect and n_drivers < MIN_DRIVERS_FOR_ESTIMATE:
+        print(
+            f"  only {n_drivers} driver(s): the race-lap effect cannot be estimated, "
+            f"using the fixed {cfg.fuel_effect_s_per_lap} s/lap fuel correction"
+        )
+    elif cfg.estimate_race_lap_effect:
         effect = _estimate_race_lap_effect(df)
         idx = np.clip(df["lap_number"].to_numpy(dtype=int), 0, len(effect) - 1)
         return effect[idx]
@@ -503,6 +518,9 @@ def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
             cfg.ref_window,
             cfg.max_delta_s,
             cfg.only_fresh_tyres,
+            # Datasets cached before the few-drivers fallback carry a meaningless
+            # race-lap correction: give them a different key.
+            0 < len(cfg.drivers) < MIN_DRIVERS_FOR_ESTIMATE,
         )
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
