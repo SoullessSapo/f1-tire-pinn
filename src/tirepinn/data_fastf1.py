@@ -250,19 +250,25 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
     total_laps = int(getattr(session, "total_laps", 0) or laps["LapNumber"].max())
     drivers = list(cfg.drivers) if cfg.drivers else sorted(laps["Driver"].dropna().unique())
 
-    df = _lap_features(laps, drivers, cfg, _track_temp_series(session))
+    df, rejected = _lap_features(laps, drivers, cfg, _track_temp_series(session))
     df = _add_normalised_context(df, cfg)
-    df["lap_time_corr"] = df["lap_time"] - _race_lap_correction(df, cfg, total_laps)
+    # The race-lap effect is measured on every driver even when only a few are
+    # kept: it is identified by comparing cars, and needs only lap times.
+    timing = _lap_timing(laps, cfg) if cfg.drivers else df
+    df["lap_time_corr"] = df["lap_time"] - _race_lap_correction(df, timing, cfg, total_laps)
 
     stints = []
+    run_lengths = []
     for (driver, stint_no), group in df.groupby(["driver", "stint"], sort=True):
+        run_lengths.append(len(group))
         stint = _assemble_stint(str(driver), int(stint_no), group, cfg)
         if stint is not None:
             stints.append(stint)
     if not stints:
         raise RuntimeError(
-            f"No stint has at least {cfg.min_stint_laps} valid laps. "
-            "Lower `min_stint_laps` or pick a race with fewer neutralisations."
+            f"No stint has at least {cfg.min_stint_laps} valid laps: {len(df)} laps passed the "
+            f"filters, in {len(run_lengths)} runs of at most {max(run_lengths)} laps "
+            f"(rejected: {_describe(rejected)}). Lower the minimum stint length."
         )
 
     return StintDataset(
@@ -273,6 +279,7 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
             "drivers": drivers,
             "fuel_effect_s_per_lap": cfg.fuel_effect_s_per_lap,
             "laps_after_filters": len(df),
+            "laps_rejected": rejected,
         },
     )
 
@@ -280,45 +287,85 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
 # --------------------------------------------------------------------------
 # Step 1: raw per-lap features
 # --------------------------------------------------------------------------
-def _lap_features(laps, drivers: Sequence[str], cfg: DataConfig, weather) -> pd.DataFrame:
-    """One row per lap that passes the quality filters, with its telemetry proxies."""
+def _lap_features(
+    laps, drivers: Sequence[str], cfg: DataConfig, weather
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """One row per lap that passes the quality filters, with its telemetry proxies.
+
+    Also returns how many laps each filter rejected: when a session yields
+    nothing, that count is the only way to tell which filter is to blame.
+    """
     records = []
+    rejected: dict[str, int] = {}
     for driver in drivers:
         for _, lap in laps[laps["Driver"] == driver].iterrows():
-            if not _passes_quality_filters(lap, cfg):
+            reason = _rejection_reason(lap, cfg)
+            record = None if reason else _lap_record(driver, lap, weather)
+            if record is None:
+                reason = reason or "no telemetry"
+                rejected[reason] = rejected.get(reason, 0) + 1
                 continue
-            record = _lap_record(driver, lap, weather)
-            if record is not None:
-                records.append(record)
+            records.append(record)
 
     if not records:
         raise RuntimeError(
-            "No stint survived the quality filters. Try another session, more "
-            "drivers, or relax `only_fresh_tyres`."
+            f"No lap survived the quality filters (rejected: {_describe(rejected)}). Try "
+            "another session, more drivers, or relax `only_fresh_tyres`."
         )
-    return pd.DataFrame.from_records(records)
+    return pd.DataFrame.from_records(records), rejected
 
 
-def _passes_quality_filters(lap, cfg: DataConfig) -> bool:
-    """Keep only clean green-flag laps whose time reflects the tire.
+def _describe(rejected: dict[str, int]) -> str:
+    return ", ".join(f"{n} {why}" for why, n in sorted(rejected.items(), key=lambda kv: -kv[1]))
+
+
+def _lap_timing(laps, cfg: DataConfig) -> pd.DataFrame:
+    """The clean laps of every driver, timing only, without telemetry.
+
+    Enough to estimate the race-lap effect, and cheap: fetching and
+    differentiating telemetry is what makes a race take minutes.
+    """
+    rows = []
+    for _, lap in laps.iterrows():
+        if _rejection_reason(lap, cfg) is not None:
+            continue
+        tyre_life = lap.get("TyreLife")
+        rows.append({
+            "driver": str(lap["Driver"]),
+            "lap_number": int(lap["LapNumber"]),
+            "tyre_life": float(tyre_life) if pd.notna(tyre_life) else np.nan,
+            "compound": str(lap.get("Compound", "MEDIUM")).upper(),
+            "lap_time": float(lap["LapTime"].total_seconds()),
+        })
+    return pd.DataFrame.from_records(
+        rows, columns=["driver", "lap_number", "tyre_life", "compound", "lap_time"]
+    )
+
+
+def _rejection_reason(lap, cfg: DataConfig) -> str | None:
+    """Why a lap does not reflect the tire, or None if it is a clean lap.
 
     Rejected: laps without a time or flagged inaccurate, laps under a safety car
-    or yellow flag, in- and out-laps, deleted laps, and (optionally) laps on a
-    used set, because d(0) = 0 only holds for a brand-new tire.
+    or yellow flag, in- and out-laps, deleted laps, laps without a stint number,
+    and (optionally) laps on a used set, because d(0) = 0 only holds for a
+    brand-new tire.
     """
     if pd.isna(lap.get("LapTime")) or not bool(lap.get("IsAccurate", False)):
-        return False
+        return "no time or inaccurate"
     if not _is_green(lap.get("TrackStatus")):
-        return False
+        return "not green flag"
     if pd.notna(lap.get("PitInTime")) or pd.notna(lap.get("PitOutTime")):
-        return False
+        return "in/out lap"
     if bool(lap.get("Deleted", False)):
-        return False
+        return "deleted"
+    if pd.isna(lap.get("Stint")):
+        return "no stint number"
     # `bool(...)` rather than `is False`: depending on the pandas version the
     # value can arrive as a Python bool or as numpy.bool_, and with `is` the
     # filter would silently fail in the second case.
-    used_set = not bool(lap.get("FreshTyre", True))
-    return not (cfg.only_fresh_tyres and used_set)
+    if cfg.only_fresh_tyres and not bool(lap.get("FreshTyre", True)):
+        return "used set"
+    return None
 
 
 def _lap_record(driver: str, lap, weather) -> dict | None:
@@ -336,7 +383,7 @@ def _lap_record(driver: str, lap, weather) -> dict | None:
     tyre_life = lap.get("TyreLife")
     return {
         "driver": driver,
-        "stint": int(lap.get("Stint", 1)),
+        "stint": int(lap["Stint"]),
         "lap_number": int(lap["LapNumber"]),
         "tyre_life": float(tyre_life) if pd.notna(tyre_life) else np.nan,
         "compound": str(lap.get("Compound", "MEDIUM")).upper(),
@@ -377,17 +424,37 @@ def _add_normalised_context(df: pd.DataFrame, cfg: DataConfig) -> pd.DataFrame:
 # --------------------------------------------------------------------------
 # Step 3: race-lap correction (fuel burn + track evolution)
 # --------------------------------------------------------------------------
-def _race_lap_correction(df: pd.DataFrame, cfg: DataConfig, total_laps: int) -> np.ndarray:
+# Below this many drivers `_estimate_race_lap_effect` is not identified. One car
+# runs each set at a single race-lap offset, so tire age and race lap move
+# together and the fit can split their sum any way it likes: on a simulated race
+# a single driver gives errors of +-3.5 s over 25 laps, against +-0.25 s with
+# two drivers and +-0.06 s with five.
+MIN_DRIVERS_FOR_ESTIMATE = 3
+
+
+def _race_lap_correction(
+    df: pd.DataFrame, timing: pd.DataFrame, cfg: DataConfig, total_laps: int
+) -> np.ndarray:
     """Seconds to subtract from each lap time to remove the race-lap effect.
 
     Uncorrected, the car speeding up as it lightens and as the track rubbers in
     looks like the opposite of degradation, and masks it entirely. By default the
     combined effect is measured per race (see `_estimate_race_lap_effect` for
     why the two parts cannot be separated and why one fixed number biases
-    circuits differently); the fixed fuel figure is only a fallback.
+    circuits differently); the fixed fuel figure is only a fallback, used too
+    when there are too few drivers to estimate the effect.
+
+    `timing` holds the laps the effect is estimated from (every driver), `df`
+    the laps it is applied to (the drivers kept).
     """
-    if cfg.estimate_race_lap_effect:
-        effect = _estimate_race_lap_effect(df)
+    n_drivers = timing["driver"].nunique()
+    if cfg.estimate_race_lap_effect and n_drivers < MIN_DRIVERS_FOR_ESTIMATE:
+        print(
+            f"  only {n_drivers} driver(s): the race-lap effect cannot be estimated, "
+            f"using the fixed {cfg.fuel_effect_s_per_lap} s/lap fuel correction"
+        )
+    elif cfg.estimate_race_lap_effect:
+        effect = _estimate_race_lap_effect(timing)
         idx = np.clip(df["lap_number"].to_numpy(dtype=int), 0, len(effect) - 1)
         return effect[idx]
     return cfg.fuel_effect_s_per_lap * (total_laps - df["lap_number"])
@@ -482,6 +549,9 @@ def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
             cfg.ref_window,
             cfg.max_delta_s,
             cfg.only_fresh_tyres,
+            # Datasets for a subset of drivers cached before the race-lap effect
+            # was measured on every driver carry a wrong correction: new key.
+            "all-driver-timing" if cfg.drivers else "",
         )
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
@@ -533,9 +603,13 @@ def build_multi_dataset(
                 _write_pickle(part, race_cache)
             print(f"{progress}: {len(part.stints)} stints")
 
-        # Prefix the race so stint ids stay unique across the season.
+        # Prefix the race so stint ids stay unique across the season. A
+        # one-race list shares its cache file with that race's own entry, which
+        # then holds ids already prefixed: never prefix twice.
+        prefix = f"{gp[:3].upper()}-"
         for stint in part.stints:
-            stint.stint_id = f"{gp[:3].upper()}-{stint.stint_id}"
+            if not stint.stint_id.startswith(prefix):
+                stint.stint_id = prefix + stint.stint_id
         all_stints.extend(part.stints)
         sources.append(part.source)
 
@@ -575,6 +649,7 @@ def build_practice_to_race(
     gps: Sequence[str],
     practice_sessions: Sequence[str] = ("FP1", "FP2", "FP3"),
     use_cache: bool = True,
+    practice_fresh_only: bool = False,
 ) -> tuple[StintDataset, StintDataset]:
     """Training stints from practice, test stints from the race of the same weekends.
 
@@ -591,23 +666,35 @@ def build_practice_to_race(
     different ages at the same race lap, which a practice session, with its
     scattered runs and varying fuel loads, does not provide.
 
+    Practice also keeps laps on used sets unless `practice_fresh_only`. Teams
+    split each set over several runs, so on a Friday nearly every run but the
+    first on a set is on used tires, and the fresh-only filter leaves almost
+    nothing. The price is that such a run starts with some wear while the model
+    assumes d(0) = 0 at its peak lap.
+
     Races with no usable practice stint are dropped from the test set and
     listed in `meta["no_practice"]`.
     """
-    train_parts = []
+    train_parts, failures = [], []
     for session in practice_sessions:
-        pcfg = replace(cfg, session=session, estimate_race_lap_effect=False)
+        pcfg = replace(
+            cfg,
+            session=session,
+            estimate_race_lap_effect=False,
+            only_fresh_tyres=practice_fresh_only,
+        )
         try:
             part = build_multi_dataset(pcfg, phys, gps, use_cache)
         except RuntimeError as exc:
             print(f"  {session}: no usable stints ({exc})")
+            failures.append(f"{session}: {exc}")
             continue
         _tag_session(part, session)
         train_parts.append(part)
     if not train_parts:
         raise RuntimeError(
-            f"No practice session ({', '.join(practice_sessions)}) produced usable stints. "
-            "Practice runs are short: try lowering the minimum stint length."
+            f"No practice session ({', '.join(practice_sessions)}) produced usable stints.\n"
+            + "\n".join(failures)
         )
     train_stints = [s for part in train_parts for s in part.stints]
 
