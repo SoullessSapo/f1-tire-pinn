@@ -64,10 +64,11 @@ def render() -> Settings:
         )
         if s.split_mode == "practice":
             s.practice_sessions = tuple(sb.multiselect(
-                "Prácticas para entrenar", ["FP1", "FP2", "FP3"], default=["FP2"],
-                help="FP2 suele tener las tandas largas con más combustible, las más parecidas "
-                     "a la carrera. En fines de semana sprint solo hay FP1.",
-            )) or ("FP2",)
+                "Prácticas para entrenar", ["FP1", "FP2", "FP3"], default=["FP1", "FP2", "FP3"],
+                help="Por defecto se descargan todas las prácticas del fin de semana. FP2 suele "
+                     "tener las tandas largas con más combustible, las más parecidas a la "
+                     "carrera. En fines de semana sprint solo hay FP1: las que falten se saltan.",
+            )) or ("FP1", "FP2", "FP3")
         else:
             s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
         drivers = sb.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")

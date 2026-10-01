@@ -573,7 +573,7 @@ def build_practice_to_race(
     cfg: DataConfig,
     phys: PhysicsConfig,
     gps: Sequence[str],
-    practice_sessions: Sequence[str] = ("FP2",),
+    practice_sessions: Sequence[str] = ("FP1", "FP2", "FP3"),
     use_cache: bool = True,
 ) -> tuple[StintDataset, StintDataset]:
     """Training stints from practice, test stints from the race of the same weekends.

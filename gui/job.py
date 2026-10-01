@@ -57,7 +57,7 @@ class Settings:
     # "random": hold out a random fraction of stints. "practice": train on the
     # practice sessions below and test on the race of the same weekends.
     split_mode: str = "random"
-    practice_sessions: tuple[str, ...] = ("FP2",)
+    practice_sessions: tuple[str, ...] = ("FP1", "FP2", "FP3")
 
     # training
     adam_iters: int = 15000

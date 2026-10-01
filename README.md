@@ -201,8 +201,8 @@ With FastF1 data, *Cómo evaluar* offers two splits:
 
 - **Stints al azar**: a random fraction of the stints of the chosen sessions is
   held out, as on the command line.
-- **Prácticas → carrera**: train on the practice sessions (FP2 by default) and
-  predict the race of the same weekends. A race stint only gives the model what
+- **Prácticas → carrera**: train on the practice sessions (all of FP1, FP2 and FP3
+  by default; sessions a weekend lacks are skipped) and predict the race of the same weekends. A race stint only gives the model what
   is known before it is run: its compound, its length and the track
   temperature. Frictional energy, load and speed come from that circuit's
   practice median, so the race telemetry is never seen. Results then compare the
