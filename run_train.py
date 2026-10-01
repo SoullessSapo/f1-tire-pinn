@@ -92,6 +92,7 @@ def build_config(args: argparse.Namespace) -> Config:
     cfg.data.n_stints = 16 if args.quick else args.stints
     cfg.data.year = args.year
     cfg.data.gp = args.gp[0]
+    cfg.data.gps = tuple(args.gp)
     cfg.data.session = args.session
     cfg.data.drivers = tuple(args.drivers)
     # Temperature is not observable in real data: only the synthetic bench can

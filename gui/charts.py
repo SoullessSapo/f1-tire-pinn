@@ -27,11 +27,13 @@ MODEL_DASH = {"PINN": "solid", "Linear (classic)": "dash", "LSTM (black box)": "
 COMPOUND_COLORS = {
     "SOFT": "#e34948",
     "MEDIUM": "#eda100",
-    "HARD": "#6b6a66",
+    "HARD": "#9a9893",
     "INTERMEDIATE": "#008300",
     "WET": "#2a78d6",
 }
-OBSERVED = "#52514e"
+# Mid greys: legible on both the light and the dark theme surface.
+OBSERVED = "#7d7c78"
+PHASE_FILL = "rgba(225, 6, 0, 0.07)"  # L-BFGS phase, in the interface's accent red
 TERM_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#e87ba4", "#4a3aa7"]
 SEQUENTIAL = [
     [0.0, "#104281"],
@@ -69,8 +71,13 @@ def _layout(fig: go.Figure, height: int = 420, title: str | None = None, **kwarg
         margin=dict(l=10, r=10, t=40, b=10),
         hovermode="x unified",
         legend=legend,
+        font=dict(family="'Titillium Web', sans-serif"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         **kwargs,
     )
+    # Plotly adds markers to short line traces by default; keep lines thin and clean.
+    fig.update_traces(selector=lambda t: t.type == "scatter" and t.mode is None, mode="lines")
     fig.update_xaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)", zeroline=False)
     fig.update_yaxes(showgrid=True, gridcolor="rgba(128,128,128,0.15)", zeroline=False)
     return fig
@@ -194,7 +201,7 @@ def stint_detail(stint, phys: PhysicsConfig) -> go.Figure:
 # ----------------------------------------------------------------------
 # Training
 # ----------------------------------------------------------------------
-def loss_curves(steps, terms, labels) -> go.Figure:
+def loss_curves(steps, terms, labels, lbfgs_from: int | None = None) -> go.Figure:
     fig = go.Figure()
     arr = np.asarray(terms, dtype=float)
     if arr.size:
@@ -205,11 +212,18 @@ def loss_curves(steps, terms, labels) -> go.Figure:
                                      line=dict(width=2, color=TERM_COLORS[i % len(TERM_COLORS)])))
     fig.update_yaxes(type="log", title="Pérdida (escala log)", exponentformat="power")
     fig.update_xaxes(title="Iteración")
+    if lbfgs_from is not None and steps and steps[-1] > lbfgs_from:
+        fig.add_vrect(x0=lbfgs_from, x1=steps[-1], fillcolor=PHASE_FILL, line_width=0,
+                      annotation_text="L-BFGS", annotation_position="top left")
     return _layout(fig, 400, title="Términos de la función de pérdida")
 
 
-def parameter_traces(trace, names, truth=None, initial=None) -> go.Figure:
-    """Convergence of each free physical parameter (small multiples, own y scale)."""
+def parameter_traces(trace, names, truth=None, lbfgs_from: int | None = None) -> go.Figure:
+    """Convergence of each free physical parameter (small multiples, own y scale).
+
+    `lbfgs_from` shades the L-BFGS phase, where DeepXDE logs far less often, so
+    the jump there is a phase change, not a glitch.
+    """
     names = list(names)
     if not names:
         return _layout(go.Figure(), 200, title="Sin parámetros libres")
@@ -229,9 +243,17 @@ def parameter_traces(trace, names, truth=None, initial=None) -> go.Figure:
         if truth is not None and name in truth:
             fig.add_hline(y=truth[name], line=dict(dash="dash", width=1.5, color=OBSERVED),
                           row=r, col=c)
+        if lbfgs_from is not None and steps and steps[-1] > lbfgs_from:
+            fig.add_vrect(x0=lbfgs_from, x1=steps[-1], fillcolor=PHASE_FILL, line_width=0,
+                          row=r, col=c)
     title = "Problema inverso: parámetros físicos durante el entrenamiento"
+    notes = []
     if truth is not None:
-        title += " (línea discontinua = valor real)"
+        notes.append("línea discontinua = valor real")
+    if lbfgs_from is not None and steps and steps[-1] > lbfgs_from:
+        notes.append("zona sombreada = fase L-BFGS")
+    if notes:
+        title += f" ({'; '.join(notes)})"
     fig.update_layout(showlegend=False)
     return _layout(fig, 230 * rows + 60, title=title)
 

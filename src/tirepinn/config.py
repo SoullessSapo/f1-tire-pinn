@@ -202,7 +202,8 @@ class DataConfig:
 
     # --- FastF1 ---
     year: int = 2023
-    gp: str = "Monza"
+    gp: str = "Monza"              # the race `build_dataset` loads
+    gps: tuple[str, ...] = ()      # every race of a multi-race run, for the record
     session: str = "R"
     drivers: tuple[str, ...] = ()
     cache_dir: str = "cache"

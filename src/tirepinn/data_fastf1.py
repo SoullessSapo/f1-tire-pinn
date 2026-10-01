@@ -228,6 +228,8 @@ def _is_green(track_status) -> bool:
 def load_session(cfg: DataConfig):
     """Download (or read from cache) the requested session."""
     fastf1 = _require_fastf1()
+    # FastF1 refuses to use a cache directory that does not exist yet.
+    Path(cfg.cache_dir).mkdir(parents=True, exist_ok=True)
     fastf1.Cache.enable_cache(cfg.cache_dir)
     session = fastf1.get_session(cfg.year, cfg.gp, cfg.session)
     session.load(laps=True, telemetry=True, weather=True, messages=False)
