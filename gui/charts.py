@@ -339,15 +339,15 @@ def violation_bars(metrics) -> go.Figure:
     return fig
 
 
-def per_stint_rmse(metrics) -> go.Figure:
+def per_stint_rmse(metrics, label: str = "prueba") -> go.Figure:
     fig = go.Figure()
     for m in metrics:
         ids = list(m.per_stint)
         fig.add_trace(go.Bar(x=ids, y=[m.per_stint[i] for i in ids], name=m.name,
                              marker=dict(color=MODEL_COLORS.get(m.name, OBSERVED))))
     fig.update_yaxes(title="RMSE [s]")
-    fig.update_xaxes(title="Stint de prueba", tickangle=-45)
-    fig = _layout(fig, 380, title="RMSE por stint de prueba", barmode="group")
+    fig.update_xaxes(title=f"Stint de {label}", tickangle=-45)
+    fig = _layout(fig, 380, title=f"RMSE por stint de {label}", barmode="group")
     fig.update_layout(hovermode="x unified", bargap=0.25)
     return fig
 
@@ -480,11 +480,16 @@ def cliff_map(pinn, phys: PhysicsConfig, horizon: int, res: int = 24) -> go.Figu
 # ----------------------------------------------------------------------
 # Race by race
 # ----------------------------------------------------------------------
-def race_grid(stints, models: dict, test_ids: set[str], cols: int = 3) -> go.Figure:
-    """Every stint of one race in its own panel: observed laps and each model."""
+def race_grid(stints, models: dict, test_ids: set[str], labels: tuple[str, str],
+              cols: int = 3) -> go.Figure:
+    """Every stint of one race in its own panel: observed laps and each model.
+
+    `labels` names the (training, test) roles in panel titles.
+    """
     rows = int(np.ceil(len(stints) / cols))
-    titles = [
-        f"{s.stint_id} · {s.compound} · {'prueba' if s.stint_id in test_ids else 'entren.'}"
+    titles = [  # the race is in the section heading, so drop it from the id
+        f"{s.stint_id.split('-', 1)[-1]} · {s.compound.title()} · "
+        f"{labels[1] if s.stint_id in test_ids else labels[0]}"
         for s in stints
     ]
     fig = make_subplots(rows=rows, cols=cols, subplot_titles=titles,
@@ -508,4 +513,22 @@ def race_grid(stints, models: dict, test_ids: set[str], cols: int = 3) -> go.Fig
             )
     fig = _layout(fig, 250 * rows + 60, title="Todos los stints de la carrera")
     fig.update_layout(hovermode="closest")
+    fig.update_annotations(font_size=12)
+    return fig
+
+
+def generalization_bars(train_metrics, test_metrics, train_label: str, test_label: str) -> go.Figure:
+    """RMSE on the stints each model learned from against the ones it never saw."""
+    fig = go.Figure()
+    for label, metrics, color in ((train_label, train_metrics, "#86b6ef"),
+                                  (test_label, test_metrics, "#2a78d6")):
+        fig.add_trace(go.Bar(
+            x=[m.name for m in metrics], y=[m.rmse for m in metrics], name=label,
+            text=[f"{m.rmse:.3f}" for m in metrics], textposition="outside",
+            marker=dict(color=color),
+        ))
+    fig.update_yaxes(title="RMSE [s]", rangemode="tozero")
+    fig = _layout(fig, 360, title=f"¿Generaliza? Error en {train_label} frente a {test_label}",
+                  barmode="group")
+    fig.update_layout(hovermode="closest", bargap=0.3, bargroupgap=0.05)
     return fig

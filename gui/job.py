@@ -25,6 +25,7 @@ import torch
 
 from tirepinn.baselines import LinearDegBaseline, LSTMBaseline
 from tirepinn.config import CONTEXT_NAMES, REAL_DATA_FREE_PARAMS, Config
+from tirepinn.dataset import StintDataset, aggregate_context_by_race
 from tirepinn.evaluate import evaluate, format_report, parameter_recovery
 from tirepinn.physics import GROUND_TRUTH
 from tirepinn.pinn import TirePINN, dde  # pinn selects the backend before importing deepxde
@@ -52,6 +53,11 @@ class Settings:
     drivers: tuple[str, ...] = ()
     aggregate_context: tuple[str, ...] = ("q_fric", "load")
     free_params: tuple[str, ...] = REAL_DATA_FREE_PARAMS
+    min_stint_laps: int = 8
+    # "random": hold out a random fraction of stints. "practice": train on the
+    # practice sessions below and test on the race of the same weekends.
+    split_mode: str = "random"
+    practice_sessions: tuple[str, ...] = ("FP2",)
 
     # training
     adam_iters: int = 15000
@@ -70,8 +76,13 @@ class Settings:
         if self.source == "synthetic":
             return ("synthetic", self.n_stints, self.noise_delta_s, self.seed)
         return (
-            "fastf1", self.year, self.gps, self.session, self.drivers, self.aggregate_context
+            "fastf1", self.year, self.gps, self.session, self.drivers, self.aggregate_context,
+            self.min_stint_laps, self.split_mode, self.practice_sessions,
         )
+
+    @property
+    def practice_to_race(self) -> bool:
+        return self.source == "fastf1" and self.split_mode == "practice"
 
     def as_args(self) -> argparse.Namespace:
         """The same namespace `run_train.parse_args()` would produce."""
@@ -102,6 +113,10 @@ class Settings:
         cfg.pinn.hidden = tuple([self.hidden_width] * self.hidden_depth)
         cfg.pinn.display_every = self.display_every
         cfg.pinn.num_domain = self.num_domain
+        cfg.data.min_stint_laps = self.min_stint_laps
+        if self.practice_to_race:
+            cfg.data.session = "R"
+            cfg.data.train_sessions = tuple(self.practice_sessions)
         if self.w_data_delta is not None:
             cfg.pinn.w_data_delta = self.w_data_delta
         return cfg
@@ -116,7 +131,8 @@ class Result:
     train: object
     test: object
     models: dict
-    metrics: list
+    metrics: list         # on the test stints
+    train_metrics: list   # on the training stints, to compare against
     report: str
     recovery: list | None
     out_dir: Path
@@ -272,7 +288,10 @@ class Job(threading.Thread):
         cfg = s.to_config()
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            data = run_train.load_data(cfg, s.as_args())
+            if s.practice_to_race:
+                data = _practice_to_race_data(cfg, s)
+            else:
+                data = run_train.load_data(cfg, s.as_args())
         self.log(buffer.getvalue())
         self.log(data.describe())
         self.data = data
@@ -286,8 +305,14 @@ class Job(threading.Thread):
         out.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
 
-        train, test = data.split(cfg.data.test_fraction, seed=s.seed)
-        self.log(f"División por stint: {len(train)} entrenamiento / {len(test)} prueba")
+        if "test_ids" in data.meta:  # practice -> race: the split is fixed by session
+            test_ids = set(data.meta["test_ids"])
+            train = StintDataset([x for x in data.stints if x.stint_id not in test_ids], data.source)
+            test = StintDataset([x for x in data.stints if x.stint_id in test_ids], data.source)
+            self.log(f"Prácticas -> carrera: {len(train)} stints de práctica / {len(test)} de carrera")
+        else:
+            train, test = data.split(cfg.data.test_fraction, seed=s.seed)
+            self.log(f"División por stint: {len(train)} entrenamiento / {len(test)} prueba")
 
         # ---- PINN
         self._set_stage("Construyendo la PINN", 0.05)
@@ -317,6 +342,9 @@ class Job(threading.Thread):
         # ---- evaluation, figures, persistence
         self._set_stage("Evaluando en stints no vistos", 0.91)
         metrics = [evaluate(name, m.predict_stint, test, cfg.physics) for name, m in models.items()]
+        train_metrics = [
+            evaluate(name, m.predict_stint, train, cfg.physics) for name, m in models.items()
+        ]
         report = format_report(metrics)
         self.log(report)
 
@@ -342,11 +370,36 @@ class Job(threading.Thread):
             test=test,
             models=models,
             metrics=metrics,
+            train_metrics=train_metrics,
             report=report,
             recovery=recovery,
             out_dir=out,
             seconds=time.time() - t0,
         )
+
+
+def _practice_to_race_data(cfg: Config, s: Settings) -> StintDataset:
+    """Practice stints plus race stints in one set, with the race ids in `meta`.
+
+    Context aggregation runs on each half separately: pooling a race's practice
+    and race stints into one median would leak the race's track temperature
+    into practice and the other way round.
+    """
+    from tirepinn import data_fastf1
+
+    train, test = data_fastf1.build_practice_to_race(
+        cfg.data, cfg.physics, s.gps, s.practice_sessions
+    )
+    if s.aggregate_context:
+        train = aggregate_context_by_race(train, s.aggregate_context)
+        test = aggregate_context_by_race(test, s.aggregate_context)
+    if test.meta.get("no_practice"):
+        print(f"  Sin prácticas, se omiten en la prueba: {', '.join(test.meta['no_practice'])}")
+    return StintDataset(
+        train.stints + test.stints,
+        f"{train.source} -> {test.source}",
+        {"test_ids": [x.stint_id for x in test.stints], "sessions": list(s.practice_sessions)},
+    )
 
 
 def loss_labels(n_terms: int) -> list[str]:

@@ -131,7 +131,23 @@ def sidebar() -> Settings:
             help="Con varias carreras el contexto varía de verdad; con una sola, el modelo "
                  "apenas ve algo más que el efecto del compuesto.",
         ))
-        s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
+        s.split_mode = sb.radio(
+            "Cómo evaluar", ["random", "practice"],
+            format_func=lambda m: {"random": "Stints al azar",
+                                   "practice": "Prácticas → carrera"}[m],
+            help="**Stints al azar**: se aparta una fracción de stints de las sesiones elegidas.\n\n"
+                 "**Prácticas → carrera**: se entrena solo con las prácticas y se predice la "
+                 "carrera del mismo fin de semana, dándole solo el compuesto, la duración de cada "
+                 "stint y la temperatura de pista. La telemetría de carrera no se usa.",
+        )
+        if s.split_mode == "practice":
+            s.practice_sessions = tuple(sb.multiselect(
+                "Prácticas para entrenar", ["FP1", "FP2", "FP3"], default=["FP2"],
+                help="FP2 suele tener las tandas largas con más combustible, las más parecidas "
+                     "a la carrera. En fines de semana sprint solo hay FP1.",
+            )) or ("FP2",)
+        else:
+            s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
         drivers = sb.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")
         s.drivers = tuple(d.upper() for d in drivers.split())
         s.aggregate_context = tuple(sb.multiselect(
@@ -139,11 +155,16 @@ def sidebar() -> Settings:
             help="Estos proxies varían mucho dentro de un mismo circuito sin predecir nada: "
                  "es ruido de medida. Ver dataset.aggregate_context_by_race.",
         ))
+        s.min_stint_laps = int(sb.number_input(
+            "Vueltas mínimas por stint", 4, 30, 6 if s.split_mode == "practice" else 8,
+            help="Las tandas de práctica son cortas: con 8 vueltas mínimas se pierden muchas.",
+        ))
         s.free_params = tuple(sb.multiselect(
             "Parámetros físicos a estimar", LEARNABLE_PARAMS, default=list(REAL_DATA_FREE_PARAMS),
             help="El resto se fija en los valores calibrados en el banco sintético.",
         ))
-    s.test_fraction = sb.slider("Fracción de stints de prueba", 0.1, 0.5, 0.25, 0.05)
+    if not s.practice_to_race:
+        s.test_fraction = sb.slider("Fracción de stints de prueba", 0.1, 0.5, 0.25, 0.05)
     s.seed = int(sb.number_input("Semilla", 0, 10_000, 42))
 
     sb = st.sidebar.container(border=True)
@@ -436,6 +457,36 @@ def tab_train(settings: Settings) -> None:
     _live()
 
 
+def roles(cfg: Config) -> tuple[str, str]:
+    """How to call the training and the test stints in this run."""
+    return ("prácticas", "carrera") if cfg.data.train_sessions else ("entrenamiento", "prueba")
+
+
+def generalization(res) -> None:
+    """Training error next to test error: did what was learned carry over?"""
+    train_label, test_label = roles(res.cfg)
+    c1, c2 = st.columns([3, 2])
+    plot(c1, charts.generalization_bars(res.train_metrics, res.metrics, train_label, test_label))
+    train = {m.name: m.rmse for m in res.train_metrics}
+    with c2.container(border=True):
+        st.markdown(f"**Lectura: {train_label} → {test_label}**")
+        for m in res.metrics:
+            seen, unseen = train[m.name], m.rmse
+            ratio = unseen / max(seen, 1e-9)
+            if seen > 0.6:
+                verdict = ":red[no aprendió ni lo que vio]"
+            elif ratio < 1.5:
+                verdict = ":green[generaliza bien]"
+            elif ratio < 3:
+                verdict = ":orange[algo de sobreajuste]"
+            else:
+                verdict = ":red[no generaliza]"
+            st.markdown(f"- **{m.name}**: {seen:.3f} s → {unseen:.3f} s (x{ratio:.1f}) · {verdict}")
+        if res.cfg.data.train_sessions:
+            st.caption("En carrera el modelo solo recibe el compuesto, la duración del stint y la "
+                       "temperatura de pista; energía, carga y velocidad vienen de las prácticas.")
+
+
 def tab_results() -> None:
     res = ss.result
     if res is None:
@@ -444,8 +495,9 @@ def tab_results() -> None:
               "un entrenamiento.")
         return
     phys = res.cfg.physics
+    train_label, test_label = roles(res.cfg)
     st.caption(f"Entrenado en {fmt_seconds(res.seconds)} · {len(res.train)} stints de "
-               f"entrenamiento, {len(res.test)} de prueba · guardado en `{res.out_dir}`")
+               f"{train_label}, {len(res.test)} de {test_label} · guardado en `{res.out_dir}`")
 
     show_diagnosis(res)
 
@@ -466,11 +518,12 @@ def tab_results() -> None:
         "Violaciones extrapolando [%]": 100 * m.extrap_violation_rate, "Vueltas evaluadas": m.n_laps,
     } for m in res.metrics])
     st.dataframe(table.style.format(precision=3, na_rep="n/d"), width="stretch", hide_index=True)
+    generalization(res)
 
     c1, c2 = st.columns(2)
     plot(c1, charts.metric_bars(res.metrics))
     plot(c2, charts.violation_bars(res.metrics))
-    plot(st, charts.per_stint_rmse(res.metrics))
+    plot(st, charts.per_stint_rmse(res.metrics, test_label))
 
     st.subheader("Parámetros físicos aprendidos")
     pinn = res.models["PINN"]
@@ -543,6 +596,7 @@ def tab_races() -> None:
     fallback = res.cfg.data.gp if res.cfg.data.source == "fastf1" else "Banco sintético"
     names = race_names(res.cfg)
     test_ids = {s.stint_id for s in res.test.stints}
+    train_label, test_label = roles(res.cfg)
 
     by_race: dict[str, list] = {}
     for s in res.data.stints:
@@ -552,22 +606,22 @@ def tab_races() -> None:
     race = c1.selectbox(
         "Carrera", list(by_race),
         format_func=lambda r: f"{r} · {len(by_race[r])} stints "
-                              f"({sum(s.stint_id in test_ids for s in by_race[r])} de prueba)",
+                              f"({sum(s.stint_id in test_ids for s in by_race[r])} de {test_label})",
     )
-    which = c2.segmented_control(
-        "Stints", ["Todos", "Solo prueba", "Solo entrenamiento"], default="Todos",
-        key="race_which",
-    ) or "Todos"
+    options = ["Todos", f"Solo {test_label}", f"Solo {train_label}"]
+    # Practice -> race is about the race: open on it.
+    default = options[1] if res.cfg.data.train_sessions else "Todos"
+    which = c2.segmented_control("Stints", options, default=default, key="race_which") or default
     stints = [
         s for s in by_race[race]
-        if which == "Todos" or (s.stint_id in test_ids) == (which == "Solo prueba")
+        if which == "Todos" or (s.stint_id in test_ids) == (which == options[1])
     ]
     if not stints:
         st.info("Esta carrera no tiene stints de ese tipo.")
         return
-    st.caption("Los stints **de prueba** no se usaron para entrenar: ahí se mide de verdad el modelo. "
-               "En los de **entrenamiento** la red ya vio esas vueltas, así que un buen ajuste ahí "
-               "no demuestra nada; un mal ajuste sí indica que no convergió.")
+    st.caption(f"Los stints de **{test_label}** no se usaron para entrenar: ahí se mide de verdad "
+               f"el modelo. En los de **{train_label}** la red ya vio esas vueltas, así que un buen "
+               "ajuste ahí no demuestra nada; un mal ajuste sí indica que no convergió.")
 
     # one stint at a time, with previous / next
     ids = [s.stint_id for s in stints]
@@ -591,7 +645,8 @@ def tab_races() -> None:
     is_test = stint.stint_id in test_ids
     st.markdown(
         f"#### {stint.stint_id} &nbsp; {compound_badge(stint.compound)} &nbsp; "
-        + (":blue-badge[🧪 prueba · nunca visto]" if is_test else ":gray-badge[📚 entrenamiento]")
+        + (f":blue-badge[🧪 {test_label} · nunca visto]" if is_test
+           else f":gray-badge[📚 {train_label}]")
         + f" &nbsp; :gray[{stint.driver} · {stint.n_laps} vueltas · {ss[key] + 1} de {len(ids)}]",
         unsafe_allow_html=True,
     )
@@ -605,9 +660,9 @@ def tab_races() -> None:
     plot(st, charts.latent_states(res.models["PINN"], stint, phys, horizon))
 
     st.subheader(f"Vista general · {race}")
-    plot(st, charts.race_grid(stints, res.models, test_ids))
+    plot(st, charts.race_grid(stints, res.models, test_ids, (train_label, test_label)))
     table = pd.DataFrame([
-        {"Stint": s.stint_id, "Conjunto": "prueba" if s.stint_id in test_ids else "entrenamiento",
+        {"Stint": s.stint_id, "Conjunto": test_label if s.stint_id in test_ids else train_label,
          "Compuesto": s.compound, "Vueltas": s.n_laps,
          **{f"RMSE {n} [s]": v for n, v in stint_errors(s, res.models).items()}}
         for s in stints

@@ -204,6 +204,9 @@ class DataConfig:
     year: int = 2023
     gp: str = "Monza"              # the race `build_dataset` loads
     gps: tuple[str, ...] = ()      # every race of a multi-race run, for the record
+    # Practice -> race mode: train on these sessions, test on the race of the
+    # same weekends (see data_fastf1.build_practice_to_race). Empty = off.
+    train_sessions: tuple[str, ...] = ()
     session: str = "R"
     drivers: tuple[str, ...] = ()
     cache_dir: str = "cache"
