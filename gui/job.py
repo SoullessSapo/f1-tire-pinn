@@ -24,7 +24,7 @@ import run_train
 import torch
 
 from tirepinn.baselines import LinearDegBaseline, LSTMBaseline
-from tirepinn.config import CONTEXT_NAMES, REAL_DATA_FREE_PARAMS, Config
+from tirepinn.config import REAL_DATA_FREE_PARAMS, Config
 from tirepinn.dataset import StintDataset, aggregate_context_by_race
 from tirepinn.evaluate import evaluate, format_report, parameter_recovery
 from tirepinn.physics import GROUND_TRUTH
@@ -219,6 +219,7 @@ class Job(threading.Thread):
 
         self.data = None
         self.result: Result | None = None
+        self.harvested = False  # its output was moved into the session
 
     # ------------------------------------------------------------------
     @property
@@ -405,5 +406,3 @@ def _practice_to_race_data(cfg: Config, s: Settings) -> StintDataset:
 def loss_labels(n_terms: int) -> list[str]:
     return LOSS_LABELS[:n_terms] + [f"L{i + 1}" for i in range(len(LOSS_LABELS), n_terms)]
 
-
-__all__ = ["CONTEXT_NAMES", "Job", "Result", "Settings", "loss_labels"]
