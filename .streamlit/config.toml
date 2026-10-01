@@ -1,0 +1,33 @@
+# Look of the graphical interface (gui/app.py). Streamlit reads this file when
+# launched from the repository root, which is what `python run_gui.py` does.
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+font = "'Titillium Web', sans-serif:https://fonts.googleapis.com/css2?family=Titillium+Web:wght@400;600;700&display=swap"
+headingFontWeights = [700, 700, 600, 600, 600, 600]
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+showSidebarBorder = true
+metricValueFontWeight = 700
+
+[theme.light]
+primaryColor = "#e10600"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f4f6"
+textColor = "#15151e"
+borderColor = "#e3e3e8"
+
+[theme.light.sidebar]
+backgroundColor = "#f4f4f6"
+
+[theme.dark]
+primaryColor = "#ff1e00"
+backgroundColor = "#15151e"
+secondaryBackgroundColor = "#1f1f2b"
+textColor = "#f2f2f5"
+borderColor = "#2f2f3d"
+
+[theme.dark.sidebar]
+backgroundColor = "#101017"

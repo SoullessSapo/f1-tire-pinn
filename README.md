@@ -177,7 +177,10 @@ Everything below can also be done from a browser app, without the command line:
 python run_gui.py          # or: streamlit run gui/app.py
 ```
 
-It opens at `http://localhost:8501` with six tabs:
+It opens at `http://localhost:8501` with six tabs. Light and dark themes live in
+`.streamlit/config.toml` and follow the system setting; switch them from the
+app menu (⋮ → Settings).
+
 
 | Tab | What it does |
 |---|---|

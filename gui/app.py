@@ -56,6 +56,29 @@ CIRCUITS = [
 ]
 TRUTH = GROUND_TRUTH.as_dict()
 
+# Only what the theme in .streamlit/config.toml cannot express: the header
+# banner and a little more presence for the tabs.
+STYLE = """
+<style>
+.hero {
+  border-radius: 0.8rem;
+  padding: 1.1rem 1.4rem 1rem;
+  margin-bottom: 0.6rem;
+  background: linear-gradient(110deg, #15151e 0%, #26263a 62%, #e10600 160%);
+  color: #ffffff;
+  border-left: 6px solid #e10600;
+}
+.hero h1 { color: #ffffff; font-size: 1.9rem; margin: 0; padding: 0; line-height: 1.2; }
+.hero p { color: #c9c9d4; margin: 0.25rem 0 0.7rem; font-size: 0.98rem; }
+.hero .chip {
+  display: inline-block; margin: 0 0.4rem 0.3rem 0; padding: 0.15rem 0.7rem;
+  border-radius: 999px; font-size: 0.85rem; border: 1px solid #4a4a5e; color: #c9c9d4;
+}
+.hero .chip.on { border-color: #e10600; background: rgba(225, 6, 0, 0.18); color: #ffffff; }
+.stTabs [data-baseweb="tab"] p { font-size: 1.02rem; font-weight: 600; }
+</style>
+"""
+
 
 # ======================================================================
 # Sidebar: configuration
@@ -73,7 +96,8 @@ def sidebar() -> Settings:
     sb.title("🏎️ F1 Tire PINN")
     sb.caption("Degradación de neumáticos con una red neuronal informada por la física")
 
-    sb.header("1 · Datos")
+    sb = st.sidebar.container(border=True)
+    sb.subheader("1 · Datos")
     source = sb.radio(
         "Fuente", ["synthetic", "fastf1"], horizontal=True,
         format_func=lambda s: "Sintético (con verdad)" if s == "synthetic" else "F1 real (FastF1)",
@@ -105,7 +129,8 @@ def sidebar() -> Settings:
     s.test_fraction = sb.slider("Fracción de stints de prueba", 0.1, 0.5, 0.25, 0.05)
     s.seed = int(sb.number_input("Semilla", 0, 10_000, 42))
 
-    sb.header("2 · Entrenamiento")
+    sb = st.sidebar.container(border=True)
+    sb.subheader("2 · Entrenamiento")
     ss.setdefault("adam", 15000)
     ss.setdefault("lbfgs", 3000)
     ss.setdefault("lstm", 800)
@@ -129,7 +154,8 @@ def sidebar() -> Settings:
             help="20 en sintético, 5 con datos reales: el ruido de una vuelta real es ~10x mayor.",
         ))
 
-    sb.header("3 · Salida")
+    sb = st.sidebar.container(border=True)
+    sb.subheader("3 · Salida")
     s.out_dir = sb.text_input("Carpeta de resultados", "outputs/gui")
     return s
 
@@ -196,11 +222,35 @@ def status_bar() -> None:
 # Tabs
 # ======================================================================
 def plot(container, fig) -> None:
-    """Draw a chart with its title as text above it (see charts._layout)."""
+    """Draw a chart in its own card, titled in text above it (see charts._layout)."""
+    card = container.container(border=True)
     title = charts.title_of(fig)
     if title:
-        container.markdown(f"**{title}**")
-    container.plotly_chart(fig, width="stretch")
+        card.markdown(f"**{title}**")
+    card.plotly_chart(fig, width="stretch")
+
+
+def kpi(container, *args, **kwargs) -> None:
+    """A metric in a card, so the numbers read as one row of tiles."""
+    container.metric(*args, border=True, **kwargs)
+
+
+def header() -> None:
+    """Banner with the state of the pipeline: what is loaded, trained, open."""
+    job: Job | None = ss.job
+    steps = [
+        ("📥 Datos cargados", ss.data is not None),
+        ("🧠 Entrenando", busy() and job.kind == "train"),
+        ("✅ Modelo entrenado", ss.result is not None),
+        ("💾 Modelo abierto", ss.loaded is not None),
+    ]
+    chips = "".join(f'<span class="chip{" on" if on else ""}">{label}</span>' for label, on in steps)
+    st.markdown(
+        f"""<div class="hero"><h1>Degradación de neumáticos F1 · PINN</h1>
+        <p>Red neuronal informada por la física: ecuaciones térmica y de desgaste + datos de vuelta</p>
+        {chips}</div>""",
+        unsafe_allow_html=True,
+    )
 
 
 def tab_data(settings: Settings) -> None:
@@ -229,11 +279,11 @@ def tab_data(settings: Settings) -> None:
 
     deltas = np.concatenate([s.delta for s in data.stints])
     m = st.columns(5)
-    m[0].metric("Stints", len(data))
-    m[1].metric("Vueltas", f"{data.n_laps:,}")
-    m[2].metric("Pilotos", len({s.driver for s in data.stints}))
-    m[3].metric("Pérdida de ritmo mediana", f"{np.median(deltas):.2f} s")
-    m[4].metric("Pérdida máxima", f"{deltas.max():.2f} s")
+    kpi(m[0], "Stints", len(data))
+    kpi(m[1], "Vueltas", f"{data.n_laps:,}")
+    kpi(m[2], "Pilotos", len({s.driver for s in data.stints}))
+    kpi(m[3], "Pérdida de ritmo mediana", f"{np.median(deltas):.2f} s")
+    kpi(m[4], "Pérdida máxima", f"{deltas.max():.2f} s")
     st.caption(f"Fuente: {data.source}")
 
     highlight = None
@@ -302,20 +352,24 @@ def tab_train(settings: Settings) -> None:
                     "físicos se dibujan en vivo mientras la red aprende.")
             return
         k = st.columns(4)
-        k[0].metric("Estado", job.stage if len(job.stage) < 28 else job.stage[:26] + "…")
-        k[1].metric("Iteración PINN", f"{job.iteration:,}")
+        state = ("Error" if job.error else "En curso" if job.running
+                 else "Detenido" if job.stop_requested.is_set() else "Terminado")
+        kpi(k[0], "Estado", state)
+        kpi(k[1], "Iteración PINN", f"{job.iteration:,}")
         total = sum(job.loss_terms[-1]) if job.loss_terms else None
         first = sum(job.loss_terms[0]) if job.loss_terms else None
-        k[2].metric("Pérdida total", f"{total:.3e}" if total else "—",
+        kpi(k[2], "Pérdida total", f"{total:.3e}" if total else "—",
                     f"÷{first / total:,.0f} desde el inicio" if total and first else None,
                     delta_color="normal", delta_arrow="down")
-        k[3].metric("Tiempo", fmt_seconds(job.elapsed))
+        kpi(k[3], "Tiempo", fmt_seconds(job.elapsed))
 
         steps, terms = list(job.loss_steps), list(job.loss_terms)
         if terms:
-            plot(st, charts.loss_curves(steps, terms, loss_labels(len(terms[0]))))
+            lbfgs_from = job.settings.adam_iters if job.settings.lbfgs_iters else None
+            plot(st, charts.loss_curves(steps, terms, loss_labels(len(terms[0])), lbfgs_from))
             truth = TRUTH if job.settings.source == "synthetic" else None
-            plot(st, charts.parameter_traces(list(job.param_trace), job.free_params, truth))
+            plot(st, charts.parameter_traces(list(job.param_trace), job.free_params, truth,
+                                             lbfgs_from))
         if job.lstm_loss:
             plot(st, charts.lstm_loss(list(job.lstm_loss)))
         with st.expander("Registro", expanded=job.error is not None):
@@ -337,9 +391,9 @@ def tab_results() -> None:
     cols = st.columns(len(res.metrics))
     for col, m in zip(cols, res.metrics, strict=False):
         if m is best:
-            col.metric(f"🏆 RMSE · {m.name}", f"{m.rmse:.3f} s", "el mejor", delta_arrow="off")
+            kpi(col, f"🏆 RMSE · {m.name}", f"{m.rmse:.3f} s", "el mejor", delta_arrow="off")
         else:
-            col.metric(f"RMSE · {m.name}", f"{m.rmse:.3f} s", f"+{m.rmse - best.rmse:.3f} s vs el mejor",
+            kpi(col, f"RMSE · {m.name}", f"{m.rmse:.3f} s", f"+{m.rmse - best.rmse:.3f} s vs el mejor",
                        delta_color="inverse")
 
     table = pd.DataFrame([{
@@ -467,11 +521,11 @@ def tab_strategy() -> None:
 
     k = st.columns(4)
     cliff = out["cliff_lap"]
-    k[0].metric("Vuelta en la que d ≥ d_crit", "no llega" if cliff is None else f"{cliff:.0f}")
-    k[1].metric("Vida útil restante", f"> {horizon - current} vueltas" if cliff is None
+    kpi(k[0], "Vuelta en la que d ≥ d_crit", "no llega" if cliff is None else f"{cliff:.0f}")
+    kpi(k[1], "Vida útil restante", f"> {horizon - current} vueltas" if cliff is None
                 else f"{out['rul_laps']:.0f} vueltas")
-    k[2].metric(f"Pérdida en la vuelta {horizon}", f"{curve['delta'][-1]:.2f} s")
-    k[3].metric("Latencia de la predicción", f"{latency:.1f} ms")
+    kpi(k[2], f"Pérdida en la vuelta {horizon}", f"{curve['delta'][-1]:.2f} s")
+    kpi(k[3], "Latencia de la predicción", f"{latency:.1f} ms")
     plot(st, charts.strategy_curve(curve, phys, cliff, current))
 
     st.subheader("Comparación de compuestos en estas condiciones")
@@ -537,7 +591,8 @@ def tab_figures() -> None:
 def main() -> None:
     settings = sidebar()
     harvest()
-    st.title("Degradación de neumáticos F1 · PINN")
+    st.html(STYLE)
+    header()
     status_bar()
     tabs = st.tabs(["📊 Datos", "🧠 Entrenamiento", "📈 Resultados", "🏁 Estrategia",
                     "🖼️ Figuras", "💾 Modelos guardados"])
