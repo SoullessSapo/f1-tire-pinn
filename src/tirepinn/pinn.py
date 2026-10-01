@@ -352,6 +352,14 @@ class TirePINN:
         # Phase 2: L-BFGS refines. The thermal coefficients only converge here.
         if cfg.lbfgs_iters > 0:
             dde.optimizers.config.set_LBFGS_options(maxiter=cfg.lbfgs_iters)
+            # DeepXDE's PyTorch L-BFGS runs in chunks of `iter_per_step` (1000 by
+            # default) and only logs and calls callbacks between chunks. Matching
+            # the chunk to `display_every` keeps the loss history and any progress
+            # display as fine-grained as in the Adam phase, and stops a short run
+            # (say 300 iterations) from silently doing a whole 1000-step chunk.
+            chunk = max(1, min(cfg.display_every, cfg.lbfgs_iters))
+            dde.optimizers.config.LBFGS_options["iter_per_step"] = chunk
+            dde.optimizers.config.LBFGS_options["fun_per_step"] = int(chunk * 1.25)
             self.model.compile(
                 "L-BFGS",
                 loss_weights=weights,

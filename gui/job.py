@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import run_train
+import torch
 
 from tirepinn.baselines import LinearDegBaseline, LSTMBaseline
 from tirepinn.config import CONTEXT_NAMES, REAL_DATA_FREE_PARAMS, Config
@@ -130,6 +131,15 @@ class _PINNProgress(dde.callbacks.Callback):
         self.job = job
         self.pinn = pinn
         self.seen = 0
+
+    def on_train_begin(self):
+        # `TirePINN.train` calls `model.train` twice: Adam first, then L-BFGS.
+        if isinstance(self.model.opt, torch.optim.LBFGS):
+            s = self.job.settings
+            self.job._set_stage(
+                f"Afinando la PINN con L-BFGS ({s.lbfgs_iters:,} iteraciones tras {s.adam_iters:,} de Adam)",
+                self.job.progress,
+            )
 
     def on_epoch_end(self):
         job = self.job
@@ -260,7 +270,7 @@ class Job(threading.Thread):
         pinn = TirePINN(cfg)
         pinn.build(train)
         self.free_params = tuple(pinn._raw_vars)
-        self._set_stage(f"Entrenando la PINN (Adam {cfg.pinn.adam_iters} + L-BFGS {cfg.pinn.lbfgs_iters})", 0.08)
+        self._set_stage(f"Entrenando la PINN con Adam ({cfg.pinn.adam_iters:,} iteraciones; luego L-BFGS {cfg.pinn.lbfgs_iters:,})", 0.08)
         pinn.train(out, callbacks=[_PINNProgress(self, pinn)])
         models = {"PINN": pinn}
 
