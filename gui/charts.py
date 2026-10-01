@@ -33,7 +33,8 @@ COMPOUND_COLORS = {
 }
 # Mid greys: legible on both the light and the dark theme surface.
 OBSERVED = "#7d7c78"
-PHASE_FILL = "rgba(225, 6, 0, 0.07)"  # L-BFGS phase, in the interface's accent red
+# Optimiser phases: blue for Adam, red for the L-BFGS refinement.
+PHASE_COLORS = {"Adam": "#2a78d6", "L-BFGS": "#e34948"}
 TERM_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#e87ba4", "#4a3aa7"]
 SEQUENTIAL = [
     [0.0, "#104281"],
@@ -72,6 +73,8 @@ def _layout(fig: go.Figure, height: int = 420, title: str | None = None, **kwarg
         hovermode="x unified",
         legend=legend,
         font=dict(family="'Titillium Web', sans-serif"),
+        hoverlabel=dict(font=dict(family="'Titillium Web', sans-serif")),
+        barcornerradius=4,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         **kwargs,
@@ -201,28 +204,64 @@ def stint_detail(stint, phys: PhysicsConfig) -> go.Figure:
 # ----------------------------------------------------------------------
 # Training
 # ----------------------------------------------------------------------
-def loss_curves(steps, terms, labels, lbfgs_from: int | None = None) -> go.Figure:
-    fig = go.Figure()
+def _split_phases(steps, phases):
+    """Indices of the Adam records and of the L-BFGS records."""
+    phases = list(phases) if phases is not None else ["Adam"] * len(steps)
+    adam = [i for i, ph in enumerate(phases) if ph == "Adam"]
+    lbfgs = [i for i, ph in enumerate(phases) if ph == "L-BFGS"]
+    return adam, lbfgs
+
+
+def loss_curves(steps, terms, labels, phases=None, lbfgs_planned: bool = False) -> go.Figure:
+    """Loss terms, with Adam and L-BFGS side by side, each counted from its own zero.
+
+    Both panels share the (log) loss axis, so the right one reads as a
+    continuation of the left one.
+    """
     arr = np.asarray(terms, dtype=float)
-    if arr.size:
-        fig.add_trace(go.Scatter(x=steps, y=arr.sum(axis=1), name="Total",
-                                 line=dict(width=2.5, color=OBSERVED)))
-        for i in range(arr.shape[1]):
-            fig.add_trace(go.Scatter(x=steps, y=arr[:, i], name=labels[i],
-                                     line=dict(width=2, color=TERM_COLORS[i % len(TERM_COLORS)])))
-    fig.update_yaxes(type="log", title="Pérdida (escala log)", exponentformat="power")
-    fig.update_xaxes(title="Iteración")
-    if lbfgs_from is not None and steps and steps[-1] > lbfgs_from:
-        fig.add_vrect(x0=lbfgs_from, x1=steps[-1], fillcolor=PHASE_FILL, line_width=0,
-                      annotation_text="L-BFGS", annotation_position="top left")
-    return _layout(fig, 400, title="Términos de la función de pérdida")
+    steps = np.asarray(steps, dtype=float)
+    adam, lbfgs = _split_phases(steps, phases)
+    two = lbfgs_planned or bool(lbfgs)
+    fig = make_subplots(
+        rows=1, cols=2 if two else 1, shared_yaxes=True, horizontal_spacing=0.03,
+        subplot_titles=["Fase 1 · Adam", "Fase 2 · L-BFGS"] if two else None,
+    )
+    panels = [(adam, 0.0, 1)]
+    if two:
+        offset = steps[lbfgs[0]] if lbfgs else 0.0
+        panels.append((lbfgs, offset, 2))
+    for idx, offset, col in panels:
+        if not idx or not arr.size:
+            continue
+        x = steps[idx] - offset
+        series = [("Total", arr[idx].sum(axis=1), OBSERVED, 2.5)] + [
+            (labels[i], arr[idx, i], TERM_COLORS[i % len(TERM_COLORS)], 2)
+            for i in range(arr.shape[1])
+        ]
+        for name, y, color, width in series:
+            fig.add_trace(
+                go.Scatter(x=x, y=y, name=name, legendgroup=name, showlegend=col == 1,
+                           line=dict(width=width, color=color)),
+                row=1, col=col,
+            )
+    if two and not lbfgs:
+        fig.add_annotation(text="Empieza cuando termine Adam", showarrow=False,
+                           xref="x2 domain", yref="y2 domain", x=0.5, y=0.5,
+                           font=dict(color=OBSERVED))
+        fig.update_xaxes(showticklabels=False, row=1, col=2)
+    fig.update_yaxes(type="log", exponentformat="power")
+    fig.update_yaxes(title="Pérdida (escala log)", row=1, col=1)
+    fig.update_xaxes(title="Iteración de Adam", row=1, col=1)
+    if two:
+        fig.update_xaxes(title="Iteración de L-BFGS", row=1, col=2)
+    return _layout(fig, 420, title="Términos de la función de pérdida")
 
 
-def parameter_traces(trace, names, truth=None, lbfgs_from: int | None = None) -> go.Figure:
+def parameter_traces(trace, names, truth=None, phases=None) -> go.Figure:
     """Convergence of each free physical parameter (small multiples, own y scale).
 
-    `lbfgs_from` shades the L-BFGS phase, where DeepXDE logs far less often, so
-    the jump there is a phase change, not a glitch.
+    The Adam and L-BFGS stretches are drawn in different colours on one global
+    iteration axis, joined at the hand-over so the curve stays continuous.
     """
     names = list(names)
     if not names:
@@ -232,30 +271,30 @@ def parameter_traces(trace, names, truth=None, lbfgs_from: int | None = None) ->
     fig = make_subplots(rows=rows, cols=cols, subplot_titles=names,
                         vertical_spacing=0.12, horizontal_spacing=0.07)
     steps = [s for s, _ in trace]
+    adam, lbfgs = _split_phases(steps, phases)
+    segments = [("Adam", adam, PHASE_COLORS["Adam"])]
+    if lbfgs:
+        segments.append(("L-BFGS", lbfgs, PHASE_COLORS["L-BFGS"]))
     for k, name in enumerate(names):
         r, c = k // cols + 1, k % cols + 1
-        fig.add_trace(
-            go.Scatter(x=steps, y=[p[name] for _, p in trace], name="Estimado",
-                       line=dict(width=2, color="#2a78d6"), showlegend=k == 0,
-                       legendgroup="est"),
-            row=r, col=c,
-        )
+        for label, idx, color in segments:
+            fig.add_trace(
+                go.Scatter(x=[steps[i] for i in idx], y=[trace[i][1][name] for i in idx],
+                           name=label, legendgroup=label, showlegend=k == 0,
+                           line=dict(width=2, color=color)),
+                row=r, col=c,
+            )
         if truth is not None and name in truth:
             fig.add_hline(y=truth[name], line=dict(dash="dash", width=1.5, color=OBSERVED),
                           row=r, col=c)
-        if lbfgs_from is not None and steps and steps[-1] > lbfgs_from:
-            fig.add_vrect(x0=lbfgs_from, x1=steps[-1], fillcolor=PHASE_FILL, line_width=0,
+        if lbfgs:
+            fig.add_vline(x=steps[lbfgs[0]], line=dict(width=1, dash="dot", color=OBSERVED),
                           row=r, col=c)
     title = "Problema inverso: parámetros físicos durante el entrenamiento"
-    notes = []
     if truth is not None:
-        notes.append("línea discontinua = valor real")
-    if lbfgs_from is not None and steps and steps[-1] > lbfgs_from:
-        notes.append("zona sombreada = fase L-BFGS")
-    if notes:
-        title += f" ({'; '.join(notes)})"
-    fig.update_layout(showlegend=False)
-    return _layout(fig, 230 * rows + 60, title=title)
+        title += " (línea discontinua = valor real)"
+    fig.update_xaxes(title="Iteración total", row=rows)
+    return _layout(fig, 230 * rows + 80, title=title)
 
 
 def lstm_loss(history) -> go.Figure:
@@ -300,15 +339,15 @@ def violation_bars(metrics) -> go.Figure:
     return fig
 
 
-def per_stint_rmse(metrics) -> go.Figure:
+def per_stint_rmse(metrics, label: str = "prueba") -> go.Figure:
     fig = go.Figure()
     for m in metrics:
         ids = list(m.per_stint)
         fig.add_trace(go.Bar(x=ids, y=[m.per_stint[i] for i in ids], name=m.name,
                              marker=dict(color=MODEL_COLORS.get(m.name, OBSERVED))))
     fig.update_yaxes(title="RMSE [s]")
-    fig.update_xaxes(title="Stint de prueba", tickangle=-45)
-    fig = _layout(fig, 380, title="RMSE por stint de prueba", barmode="group")
+    fig.update_xaxes(title=f"Stint de {label}", tickangle=-45)
+    fig = _layout(fig, 380, title=f"RMSE por stint de {label}", barmode="group")
     fig.update_layout(hovermode="x unified", bargap=0.25)
     return fig
 
@@ -435,4 +474,61 @@ def cliff_map(pinn, phys: PhysicsConfig, horizon: int, res: int = 24) -> go.Figu
     fig = _layout(fig, 380, title=f"Mapa de decisión: vuelta en la que d alcanza d_crit "
                                   f"(en blanco = no se alcanza en {horizon} vueltas)")
     fig.update_layout(hovermode="closest")
+    return fig
+
+
+# ----------------------------------------------------------------------
+# Race by race
+# ----------------------------------------------------------------------
+def race_grid(stints, models: dict, test_ids: set[str], labels: tuple[str, str],
+              cols: int = 3) -> go.Figure:
+    """Every stint of one race in its own panel: observed laps and each model.
+
+    `labels` names the (training, test) roles in panel titles.
+    """
+    rows = int(np.ceil(len(stints) / cols))
+    titles = [  # the race is in the section heading, so drop it from the id
+        f"{s.stint_id.split('-', 1)[-1]} · {s.compound.title()} · "
+        f"{labels[1] if s.stint_id in test_ids else labels[0]}"
+        for s in stints
+    ]
+    fig = make_subplots(rows=rows, cols=cols, subplot_titles=titles,
+                        vertical_spacing=0.32 / max(rows, 1) + 0.04, horizontal_spacing=0.05)
+    for k, s in enumerate(stints):
+        r, c = k // cols + 1, k % cols + 1
+        fig.add_trace(
+            go.Scatter(x=s.laps, y=s.delta, mode="markers", name="Observado",
+                       legendgroup="obs", showlegend=k == 0,
+                       marker=dict(size=6, color=OBSERVED)),
+            row=r, col=c,
+        )
+        for name, model in models.items():
+            pred = np.asarray(model.predict_stint(s.context, s.laps)).ravel()
+            fig.add_trace(
+                go.Scatter(x=s.laps, y=pred, mode="lines", name=name, legendgroup=name,
+                           showlegend=k == 0,
+                           line=dict(width=2, color=MODEL_COLORS.get(name, "#4a3aa7"),
+                                     dash=MODEL_DASH.get(name, "solid"))),
+                row=r, col=c,
+            )
+    fig = _layout(fig, 250 * rows + 60, title="Todos los stints de la carrera")
+    fig.update_layout(hovermode="closest")
+    fig.update_annotations(font_size=12)
+    return fig
+
+
+def generalization_bars(train_metrics, test_metrics, train_label: str, test_label: str) -> go.Figure:
+    """RMSE on the stints each model learned from against the ones it never saw."""
+    fig = go.Figure()
+    for label, metrics, color in ((train_label, train_metrics, "#86b6ef"),
+                                  (test_label, test_metrics, "#2a78d6")):
+        fig.add_trace(go.Bar(
+            x=[m.name for m in metrics], y=[m.rmse for m in metrics], name=label,
+            text=[f"{m.rmse:.3f}" for m in metrics], textposition="outside",
+            marker=dict(color=color),
+        ))
+    fig.update_yaxes(title="RMSE [s]", rangemode="tozero")
+    fig = _layout(fig, 360, title=f"¿Generaliza? Error en {train_label} frente a {test_label}",
+                  barmode="group")
+    fig.update_layout(hovermode="closest", bargap=0.3, bargroupgap=0.05)
     return fig

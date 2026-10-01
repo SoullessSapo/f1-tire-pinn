@@ -552,6 +552,97 @@ def build_multi_dataset(
     return data
 
 
+# --------------------------------------------------------------------------
+# Practice -> race: train on Friday, predict Sunday
+# --------------------------------------------------------------------------
+# Context components a team only knows from running the car: frictional energy,
+# mechanical load and speed. In the race split they come from practice, never
+# from the race itself. Track temperature (a weather forecast) and the compound
+# stay the race's own.
+CAR_CONTEXT = (0, 1, 2)
+
+
+def _tag_session(data: StintDataset, session: str) -> None:
+    """SAU-PIA-S3 -> SAU-FP2-PIA-S3, so practice and race ids never collide."""
+    for stint in data.stints:
+        race, rest = stint.stint_id.split("-", 1)
+        stint.stint_id = f"{race}-{session}-{rest}"
+
+
+def build_practice_to_race(
+    cfg: DataConfig,
+    phys: PhysicsConfig,
+    gps: Sequence[str],
+    practice_sessions: Sequence[str] = ("FP1", "FP2", "FP3"),
+    use_cache: bool = True,
+) -> tuple[StintDataset, StintDataset]:
+    """Training stints from practice, test stints from the race of the same weekends.
+
+    The question this answers is the one a strategist faces on Sunday morning:
+    having seen Friday's long runs, how will each tire behave in the race? So
+    the race stints are only used for what is known before they happen -- the
+    compound, how many laps the stint lasts and the track temperature -- plus
+    their observed lap times, to score the prediction. Their frictional energy,
+    load and speed are replaced by the median of that circuit's practice
+    stints: the race telemetry of the driver is never shown to the model.
+
+    Practice uses a fixed fuel correction instead of the per-race estimate.
+    `_estimate_race_lap_effect` identifies track evolution from cars on tires of
+    different ages at the same race lap, which a practice session, with its
+    scattered runs and varying fuel loads, does not provide.
+
+    Races with no usable practice stint are dropped from the test set and
+    listed in `meta["no_practice"]`.
+    """
+    train_parts = []
+    for session in practice_sessions:
+        pcfg = replace(cfg, session=session, estimate_race_lap_effect=False)
+        try:
+            part = build_multi_dataset(pcfg, phys, gps, use_cache)
+        except RuntimeError as exc:
+            print(f"  {session}: no usable stints ({exc})")
+            continue
+        _tag_session(part, session)
+        train_parts.append(part)
+    if not train_parts:
+        raise RuntimeError(
+            f"No practice session ({', '.join(practice_sessions)}) produced usable stints. "
+            "Practice runs are short: try lowering the minimum stint length."
+        )
+    train_stints = [s for part in train_parts for s in part.stints]
+
+    race = build_multi_dataset(replace(cfg, session="R"), phys, gps, use_cache)
+    _tag_session(race, "R")
+
+    by_race: dict[str, list[Stint]] = {}
+    for stint in train_stints:
+        by_race.setdefault(stint.stint_id.split("-", 1)[0], []).append(stint)
+    car_context = {
+        code: np.median(np.vstack([s.context for s in stints]), axis=0)
+        for code, stints in by_race.items()
+    }
+
+    test_stints, no_practice = [], set()
+    for stint in race.stints:
+        code = stint.stint_id.split("-", 1)[0]
+        if code not in car_context:
+            no_practice.add(code)
+            continue
+        context = stint.context.copy()
+        context[list(CAR_CONTEXT)] = car_context[code][list(CAR_CONTEXT)]
+        stint.context = context
+        test_stints.append(stint)
+    if not test_stints:
+        raise RuntimeError("None of the races has practice data to predict it from.")
+
+    sessions = "+".join(practice_sessions)
+    train = StintDataset(train_stints, f"fastf1:{cfg.year} {sessions}",
+                         {"races": list(gps), "split": "train", "sessions": list(practice_sessions)})
+    test = StintDataset(test_stints, f"fastf1:{cfg.year} R",
+                        {"races": list(gps), "split": "test", "no_practice": sorted(no_practice)})
+    return train, test
+
+
 def _read_pickle(path: Path):
     with open(path, "rb") as fh:
         return pickle.load(fh)
