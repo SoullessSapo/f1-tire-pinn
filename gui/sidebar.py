@@ -114,6 +114,12 @@ def render() -> Settings:
         s.lr = float(st.number_input("Tasa de aprendizaje", 1e-5, 1e-1, 1e-3, format="%.0e"))
         s.hidden_width = int(st.number_input("Neuronas por capa", 8, 512, 64, 8))
         s.hidden_depth = int(st.number_input("Capas ocultas", 1, 10, 4))
+        s.activation = st.selectbox(
+            "Función de activación", ["tanh", "sin", "swish", "gelu"],
+            help="Debe ser suave: el residuo físico deriva la red. Por eso no se ofrece ReLU, "
+                 "cuya segunda derivada es cero. La forma de la curva de desgaste la fijan las "
+                 "ecuaciones, no la activación.",
+        )
         s.num_domain = int(st.number_input("Puntos de colocación", 200, 50_000, 4000, 200))
         s.display_every = int(st.number_input("Refrescar pérdida cada N iteraciones", 10, 5000, 250, 10))
         default_w = 20.0 if source == "synthetic" else 5.0

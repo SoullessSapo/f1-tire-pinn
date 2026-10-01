@@ -66,6 +66,7 @@ class Settings:
     lr: float = 1e-3
     hidden_width: int = 64
     hidden_depth: int = 4
+    activation: str = "tanh"
     display_every: int = 250
     num_domain: int = 4000
     w_data_delta: float | None = None  # None = the default for the source
@@ -112,6 +113,7 @@ class Settings:
         cfg.data.test_fraction = self.test_fraction
         cfg.pinn.lr = self.lr
         cfg.pinn.hidden = tuple([self.hidden_width] * self.hidden_depth)
+        cfg.pinn.activation = self.activation
         cfg.pinn.display_every = self.display_every
         cfg.pinn.num_domain = self.num_domain
         cfg.data.min_stint_laps = self.min_stint_laps
