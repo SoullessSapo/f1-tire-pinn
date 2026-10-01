@@ -136,6 +136,7 @@ class _PINNProgress(dde.callbacks.Callback):
         # `TirePINN.train` calls `model.train` twice: Adam first, then L-BFGS.
         if isinstance(self.model.opt, torch.optim.LBFGS):
             s = self.job.settings
+            self.job.lbfgs_start = int(self.model.train_state.step)
             self.job._set_stage(
                 f"Afinando la PINN con L-BFGS ({s.lbfgs_iters:,} iteraciones tras {s.adam_iters:,} de Adam)",
                 self.job.progress,
@@ -153,15 +154,20 @@ class _PINNProgress(dde.callbacks.Callback):
         if len(history.steps) == self.seen:
             return
         params = self.pinn.learned_params().as_dict()
-        for step, loss in zip(
-            history.steps[self.seen :], history.loss_train[self.seen :], strict=False
-        ):
+        phase = job.phase
+        new = list(zip(history.steps[self.seen :], history.loss_train[self.seen :], strict=False))
+        for k, (step, loss) in enumerate(new):
             terms = [float(v) for v in loss]
+            # Parameters can only be read now, i.e. at the newest record. Older
+            # records in the same batch -- such as the L-BFGS starting point, logged
+            # before its first chunk ran -- keep the last values actually seen.
+            last = k == len(new) - 1 or not job.param_trace
             job.loss_steps.append(int(step))
             job.loss_terms.append(terms)
-            job.param_trace.append((int(step), params))
+            job.param_trace.append((int(step), params if last else job.param_trace[-1][1]))
+            job.loss_phases.append(phase)
             job.log(
-                f"iter {int(step):>6d} | pérdida total {sum(terms):.4e} | "
+                f"{phase:<6} iter {job.phase_step(int(step)):>6d} | pérdida total {sum(terms):.4e} | "
                 + " ".join(f"L{i + 1}={v:.2e}" for i, v in enumerate(terms))
             )
         self.seen = len(history.steps)
@@ -185,9 +191,11 @@ class Job(threading.Thread):
         self.stop_requested = threading.Event()
 
         # live training traces
-        self.iteration = 0
+        self.iteration = 0  # DeepXDE's global step, Adam and L-BFGS together
         self.total_iterations = settings.adam_iters + settings.lbfgs_iters
+        self.lbfgs_start: int | None = None  # global step at which L-BFGS began
         self.loss_steps: list[int] = []
+        self.loss_phases: list[str] = []  # "Adam" or "L-BFGS", one per loss record
         self.loss_terms: list[list[float]] = []
         self.param_trace: list[tuple[int, dict]] = []
         self.lstm_loss: list[float] = []
@@ -204,6 +212,22 @@ class Job(threading.Thread):
     @property
     def elapsed(self) -> float:
         return (self.finished or time.time()) - self.started
+
+    @property
+    def phase(self) -> str:
+        return "Adam" if self.lbfgs_start is None else "L-BFGS"
+
+    def phase_step(self, step: int) -> int:
+        """Iterations into the current phase, counting each phase from zero."""
+        return step if self.lbfgs_start is None else step - self.lbfgs_start
+
+    @property
+    def adam_iteration(self) -> int:
+        return self.iteration if self.lbfgs_start is None else self.lbfgs_start
+
+    @property
+    def lbfgs_iteration(self) -> int:
+        return 0 if self.lbfgs_start is None else self.iteration - self.lbfgs_start
 
     def log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")

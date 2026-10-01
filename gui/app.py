@@ -202,7 +202,7 @@ def status_bar() -> None:
                 progress = 0.08 + 0.72 * min(job.iteration / job.total_iterations, 1.0)
             c1, c2 = st.columns([6, 1])
             c1.progress(progress, text=f"⏳ **{job.stage}** · {fmt_seconds(job.elapsed)}"
-                        + (f" · iteración {job.iteration:,}" if job.iteration else ""))
+                        + (f" · {phase_counter(job)}" if job.iteration else ""))
             if c2.button("⏹ Detener", width="stretch", disabled=job.kind != "train"):
                 job.stop_requested.set()
                 job.log("Parada solicitada: se termina la fase actual y se evalúa lo entrenado")
@@ -228,6 +228,13 @@ def plot(container, fig) -> None:
     if title:
         card.markdown(f"**{title}**")
     card.plotly_chart(fig, width="stretch")
+
+
+def phase_counter(job: Job) -> str:
+    s = job.settings
+    if job.lbfgs_start is None:
+        return f"Adam {job.adam_iteration:,} / {s.adam_iters:,}"
+    return f"L-BFGS {job.lbfgs_iteration:,} / {s.lbfgs_iters:,} (Adam terminado)"
 
 
 def kpi(container, *args, **kwargs) -> None:
@@ -351,11 +358,14 @@ def tab_train(settings: Settings) -> None:
             st.info("Pulsa **Entrenar** para empezar. Las curvas de pérdida y los parámetros "
                     "físicos se dibujan en vivo mientras la red aprende.")
             return
+        # The state itself is in the status bar at the top.
         k = st.columns(4)
-        state = ("Error" if job.error else "En curso" if job.running
-                 else "Detenido" if job.stop_requested.is_set() else "Terminado")
-        kpi(k[0], "Estado", state)
-        kpi(k[1], "Iteración PINN", f"{job.iteration:,}")
+        s = job.settings
+        kpi(k[0], "Iteraciones Adam", f"{job.adam_iteration:,}", f"de {s.adam_iters:,}",
+            delta_color="off", delta_arrow="off")
+        kpi(k[1], "Iteraciones L-BFGS", f"{job.lbfgs_iteration:,}",
+            f"de {s.lbfgs_iters:,}" if s.lbfgs_iters else "desactivado",
+            delta_color="off", delta_arrow="off")
         total = sum(job.loss_terms[-1]) if job.loss_terms else None
         first = sum(job.loss_terms[0]) if job.loss_terms else None
         kpi(k[2], "Pérdida total", f"{total:.3e}" if total else "—",
@@ -363,13 +373,16 @@ def tab_train(settings: Settings) -> None:
                     delta_color="normal", delta_arrow="down")
         kpi(k[3], "Tiempo", fmt_seconds(job.elapsed))
 
-        steps, terms = list(job.loss_steps), list(job.loss_terms)
+        # The worker appends to these lists one after another; read a common prefix.
+        n = min(len(job.loss_steps), len(job.loss_terms), len(job.param_trace), len(job.loss_phases))
+        steps, terms = job.loss_steps[:n], job.loss_terms[:n]
         if terms:
-            lbfgs_from = job.settings.adam_iters if job.settings.lbfgs_iters else None
-            plot(st, charts.loss_curves(steps, terms, loss_labels(len(terms[0])), lbfgs_from))
-            truth = TRUTH if job.settings.source == "synthetic" else None
-            plot(st, charts.parameter_traces(list(job.param_trace), job.free_params, truth,
-                                             lbfgs_from))
+            phases = job.loss_phases[:n]
+            plot(st, charts.loss_curves(steps, terms, loss_labels(len(terms[0])), phases,
+                                        lbfgs_planned=s.lbfgs_iters > 0))
+            truth = TRUTH if s.source == "synthetic" else None
+            plot(st, charts.parameter_traces(job.param_trace[:n], job.free_params,
+                                             truth, phases))
         if job.lstm_loss:
             plot(st, charts.lstm_loss(list(job.lstm_loss)))
         with st.expander("Registro", expanded=job.error is not None):
