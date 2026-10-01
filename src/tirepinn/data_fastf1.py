@@ -252,7 +252,10 @@ def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDa
 
     df, rejected = _lap_features(laps, drivers, cfg, _track_temp_series(session))
     df = _add_normalised_context(df, cfg)
-    df["lap_time_corr"] = df["lap_time"] - _race_lap_correction(df, cfg, total_laps)
+    # The race-lap effect is measured on every driver even when only a few are
+    # kept: it is identified by comparing cars, and needs only lap times.
+    timing = _lap_timing(laps, cfg) if cfg.drivers else df
+    df["lap_time_corr"] = df["lap_time"] - _race_lap_correction(df, timing, cfg, total_laps)
 
     stints = []
     run_lengths = []
@@ -314,6 +317,29 @@ def _lap_features(
 
 def _describe(rejected: dict[str, int]) -> str:
     return ", ".join(f"{n} {why}" for why, n in sorted(rejected.items(), key=lambda kv: -kv[1]))
+
+
+def _lap_timing(laps, cfg: DataConfig) -> pd.DataFrame:
+    """The clean laps of every driver, timing only, without telemetry.
+
+    Enough to estimate the race-lap effect, and cheap: fetching and
+    differentiating telemetry is what makes a race take minutes.
+    """
+    rows = []
+    for _, lap in laps.iterrows():
+        if _rejection_reason(lap, cfg) is not None:
+            continue
+        tyre_life = lap.get("TyreLife")
+        rows.append({
+            "driver": str(lap["Driver"]),
+            "lap_number": int(lap["LapNumber"]),
+            "tyre_life": float(tyre_life) if pd.notna(tyre_life) else np.nan,
+            "compound": str(lap.get("Compound", "MEDIUM")).upper(),
+            "lap_time": float(lap["LapTime"].total_seconds()),
+        })
+    return pd.DataFrame.from_records(
+        rows, columns=["driver", "lap_number", "tyre_life", "compound", "lap_time"]
+    )
 
 
 def _rejection_reason(lap, cfg: DataConfig) -> str | None:
@@ -406,7 +432,9 @@ def _add_normalised_context(df: pd.DataFrame, cfg: DataConfig) -> pd.DataFrame:
 MIN_DRIVERS_FOR_ESTIMATE = 3
 
 
-def _race_lap_correction(df: pd.DataFrame, cfg: DataConfig, total_laps: int) -> np.ndarray:
+def _race_lap_correction(
+    df: pd.DataFrame, timing: pd.DataFrame, cfg: DataConfig, total_laps: int
+) -> np.ndarray:
     """Seconds to subtract from each lap time to remove the race-lap effect.
 
     Uncorrected, the car speeding up as it lightens and as the track rubbers in
@@ -415,15 +443,18 @@ def _race_lap_correction(df: pd.DataFrame, cfg: DataConfig, total_laps: int) -> 
     why the two parts cannot be separated and why one fixed number biases
     circuits differently); the fixed fuel figure is only a fallback, used too
     when there are too few drivers to estimate the effect.
+
+    `timing` holds the laps the effect is estimated from (every driver), `df`
+    the laps it is applied to (the drivers kept).
     """
-    n_drivers = df["driver"].nunique()
+    n_drivers = timing["driver"].nunique()
     if cfg.estimate_race_lap_effect and n_drivers < MIN_DRIVERS_FOR_ESTIMATE:
         print(
             f"  only {n_drivers} driver(s): the race-lap effect cannot be estimated, "
             f"using the fixed {cfg.fuel_effect_s_per_lap} s/lap fuel correction"
         )
     elif cfg.estimate_race_lap_effect:
-        effect = _estimate_race_lap_effect(df)
+        effect = _estimate_race_lap_effect(timing)
         idx = np.clip(df["lap_number"].to_numpy(dtype=int), 0, len(effect) - 1)
         return effect[idx]
     return cfg.fuel_effect_s_per_lap * (total_laps - df["lap_number"])
@@ -518,9 +549,9 @@ def _dataset_cache_path(cfg: DataConfig, gps: Sequence[str]) -> Path:
             cfg.ref_window,
             cfg.max_delta_s,
             cfg.only_fresh_tyres,
-            # Datasets cached before the few-drivers fallback carry a meaningless
-            # race-lap correction: give them a different key.
-            0 < len(cfg.drivers) < MIN_DRIVERS_FOR_ESTIMATE,
+            # Datasets for a subset of drivers cached before the race-lap effect
+            # was measured on every driver carry a wrong correction: new key.
+            "all-driver-timing" if cfg.drivers else "",
         )
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
