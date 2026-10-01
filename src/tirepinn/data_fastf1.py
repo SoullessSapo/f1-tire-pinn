@@ -603,9 +603,13 @@ def build_multi_dataset(
                 _write_pickle(part, race_cache)
             print(f"{progress}: {len(part.stints)} stints")
 
-        # Prefix the race so stint ids stay unique across the season.
+        # Prefix the race so stint ids stay unique across the season. A
+        # one-race list shares its cache file with that race's own entry, which
+        # then holds ids already prefixed: never prefix twice.
+        prefix = f"{gp[:3].upper()}-"
         for stint in part.stints:
-            stint.stint_id = f"{gp[:3].upper()}-{stint.stint_id}"
+            if not stint.stint_id.startswith(prefix):
+                stint.stint_id = prefix + stint.stint_id
         all_stints.extend(part.stints)
         sources.append(part.source)
 
