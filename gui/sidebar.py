@@ -69,10 +69,22 @@ def render() -> Settings:
                      "tener las tandas largas con más combustible, las más parecidas a la "
                      "carrera. En fines de semana sprint solo hay FP1: las que falten se saltan.",
             )) or ("FP1", "FP2", "FP3")
+            s.practice_fresh_only = not sb.toggle(
+                "Usar juegos ya usados en prácticas", value=True,
+                help="Los equipos reparten cada juego en varias tandas: en prácticas casi todas "
+                     "son con neumáticos usados. Si se desactiva, solo quedan las primeras "
+                     "tandas de cada juego y puede no quedar ninguna. El precio: esas tandas "
+                     "empiezan con algo de desgaste, y el modelo supone d = 0 al inicio.",
+            )
         else:
             s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
         drivers = sb.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")
         s.drivers = tuple(d.upper() for d in drivers.split())
+        if s.drivers:
+            sb.caption(
+                "Se entrena solo con estos pilotos. El efecto del combustible y de la pista se "
+                "mide igualmente con todos: necesita comparar coches."
+            )
         s.aggregate_context = tuple(sb.multiselect(
             "Colapsar a la mediana de la carrera", CONTEXT_NAMES, default=["q_fric", "load"],
             help="Estos proxies varían mucho dentro de un mismo circuito sin predecir nada: "
@@ -107,6 +119,12 @@ def render() -> Settings:
         s.lr = float(st.number_input("Tasa de aprendizaje", 1e-5, 1e-1, 1e-3, format="%.0e"))
         s.hidden_width = int(st.number_input("Neuronas por capa", 8, 512, 64, 8))
         s.hidden_depth = int(st.number_input("Capas ocultas", 1, 10, 4))
+        s.activation = st.selectbox(
+            "Función de activación", ["tanh", "sin", "swish", "gelu"],
+            help="Debe ser suave: el residuo físico deriva la red. Por eso no se ofrece ReLU, "
+                 "cuya segunda derivada es cero. La forma de la curva de desgaste la fijan las "
+                 "ecuaciones, no la activación.",
+        )
         s.num_domain = int(st.number_input("Puntos de colocación", 200, 50_000, 4000, 200))
         s.display_every = int(st.number_input("Refrescar pérdida cada N iteraciones", 10, 5000, 250, 10))
         default_w = 20.0 if source == "synthetic" else 5.0
