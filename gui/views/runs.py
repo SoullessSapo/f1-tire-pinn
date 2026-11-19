@@ -64,7 +64,7 @@ def render() -> None:
             "Stints", help="Entrenamiento / prueba")},
     )
     if len(runs) > 1:
-        plot(st, charts.history_rmse(runs))
+        plot(st, charts.history_rmse(runs), key="history-rmse")
 
     st.divider()
     run = runs[[_label(r) for r in runs].index(
@@ -101,12 +101,14 @@ def render() -> None:
     if traces["loss_terms"]:
         terms = traces["loss_terms"]
         plot(st, charts.loss_curves(traces["loss_steps"], terms, loss_labels(len(terms[0])),
-                                    traces["loss_phases"], lbfgs_planned=traces["lbfgs_planned"]))
+                                    traces["loss_phases"], lbfgs_planned=traces["lbfgs_planned"]),
+             key=f"history-loss-{folder.name}")
         truth = TRUTH if run["source"] == "synthetic" else None
         plot(st, charts.parameter_traces(traces["param_trace"], traces["free_params"], truth,
-                                         traces["loss_phases"]))
+                                         traces["loss_phases"]),
+             key=f"history-params-{folder.name}")
     if traces["lstm_loss"]:
-        plot(st, charts.lstm_loss(traces["lstm_loss"]))
+        plot(st, charts.lstm_loss(traces["lstm_loss"]), key=f"history-lstm-{folder.name}")
     with st.expander("Registro"):
         st.code("\n".join(traces["log"][-300:]) or "…", language=None)
     with st.expander("Ajustes de la barra lateral"):
