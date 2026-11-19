@@ -7,7 +7,7 @@ Launch with
 Everything the command line does is here: load synthetic or real FastF1 data,
 train the PINN and the two baselines while watching the loss and the physical
 parameters converge, compare the models race by race, explore strategy
-predictions, and reopen models trained earlier.
+predictions, and reopen earlier runs and models.
 
 This file only assembles the page. The pieces live next to it:
 
@@ -17,6 +17,7 @@ This file only assembles the page. The pieces live next to it:
     ui.py        shared widgets: cards, tiles, badges, header, status bar
     charts.py    the Plotly figures
     analysis.py  convergence checks and per-stint errors (no Streamlit)
+    history.py   saving each run whole and reopening it (no Streamlit)
     views/       one module per tab
 """
 
@@ -33,11 +34,12 @@ import session
 import sidebar
 import streamlit as st
 import ui
-from views import data, races, results, saved, strategy, training
+from views import data, races, results, runs, saved, strategy, training
 
 TABS = (
     ("📊 Datos", data.render, True),
     ("🧠 Entrenamiento", training.render, True),
+    ("🗂️ Historial", runs.render, False),
     ("📈 Resultados", results.render, False),
     ("🔎 Carrera a carrera", races.render, False),
     ("🏁 Estrategia", strategy.render, False),

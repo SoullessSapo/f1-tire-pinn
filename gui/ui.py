@@ -56,13 +56,18 @@ def fmt_seconds(sec: float) -> str:
     return f"{m} min {s:02d} s" if m else f"{s} s"
 
 
-def plot(container, fig) -> None:
-    """Draw a chart in its own card, titled in text above it (see charts._layout)."""
+def plot(container, fig, key: str | None = None) -> None:
+    """Draw a chart in its own card, titled in text above it (see charts._layout).
+
+    Streamlit derives a chart's id from the figure itself, so the same figure
+    drawn in two tabs (a run's curves in Entrenamiento and in Historial) needs
+    a `key` to tell them apart.
+    """
     card = container.container(border=True)
     title = charts.title_of(fig)
     if title:
         card.markdown(f"**{title}**")
-    card.plotly_chart(fig, width="stretch")
+    card.plotly_chart(fig, width="stretch", key=key)
 
 
 def kpi(container, *args, **kwargs) -> None:

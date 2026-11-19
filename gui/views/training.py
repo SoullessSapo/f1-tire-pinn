@@ -22,7 +22,7 @@ def render(settings: Settings) -> None:
         f"PINN: Adam {settings.adam_iters:,} + L-BFGS {settings.lbfgs_iters:,} iteraciones · "
         f"red {settings.hidden_depth}x{settings.hidden_width} · "
         + ("con líneas base" if settings.train_baselines else "sin líneas base")
-        + f" · resultados en `{settings.out_dir}`"
+        + f" · cada entrenamiento se guarda en su propia carpeta dentro de `{settings.out_dir}`"
     )
     with st.expander("Configuración completa que se usará"):
         try:

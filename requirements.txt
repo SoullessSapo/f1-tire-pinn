@@ -9,7 +9,10 @@ pandas>=2.0
 matplotlib>=3.7
 
 # Solo necesario para --source fastf1
-fastf1>=3.3
+# 3.9 o más nuevo: la F1 ya solo sirve sus datos de tiempos a una cuenta con
+# F1 TV, y la 3.9 es la que inicia sesión (variables F1_USERNAME y F1_PASSWORD).
+# Las anteriores a la 3.5 además consultan la API de Ergast, que ya cerró.
+fastf1>=3.9
 
 # Interfaz gráfica (python run_gui.py)
 streamlit>=1.46

@@ -222,6 +222,7 @@ class Job(threading.Thread):
 
         self.data = None
         self.result: Result | None = None
+        self.out_dir: Path | None = None  # this run's own folder, once training starts
         self.harvested = False  # its output was moved into the session
 
     # ------------------------------------------------------------------
@@ -302,11 +303,16 @@ class Job(threading.Thread):
         return data
 
     def _train(self) -> None:
+        import history  # imports this module, so only once it is loaded
+
         s = self.settings
         data = self._load_data()
         cfg = s.to_config()
-        out = Path(cfg.out_dir)
+        # Every run gets its own folder, so earlier runs stay in the history.
+        out = history.run_folder(s.out_dir, s)
+        cfg.out_dir = str(out)
         out.mkdir(parents=True, exist_ok=True)
+        self.out_dir = out
         t0 = time.time()
 
         if "test_ids" in data.meta:  # practice -> race: the split is fixed by session
@@ -380,6 +386,11 @@ class Job(threading.Thread):
             out_dir=out,
             seconds=time.time() - t0,
         )
+        try:
+            history.save_run(self, self.result)
+            self.log("Guardado en el historial: se puede reabrir desde 🗂️ Historial")
+        except Exception as exc:  # the run itself is fine; only reopening it later is lost
+            self.log(f"No se pudo guardar en el historial: {type(exc).__name__}: {exc}")
 
 
 def _practice_to_race_data(cfg: Config, s: Settings) -> StintDataset:

@@ -17,7 +17,8 @@ from tirepinn.config import COMPOUND_INDEX
 def _strategy_model():
     choices = {}
     if ss.result is not None:
-        choices["Último entrenamiento"] = (ss.result.models["PINN"], ss.result.cfg)
+        choices[f"Entrenamiento activo ({ss.result.out_dir.name})"] = (ss.result.models["PINN"],
+                                                                       ss.result.cfg)
     if ss.loaded is not None:
         choices[f"Modelo cargado ({ss.loaded['dir'].name})"] = (ss.loaded["pinn"], ss.loaded["cfg"])
     return choices
