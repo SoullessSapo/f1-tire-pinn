@@ -240,8 +240,10 @@ python run_train.py --source fastf1 --year 2023 --gp Monza Hungary Bahrain Spain
 
 Formula 1 now serves its timing data (livetiming.formula1.com) only to a
 signed-in account with an active F1 TV subscription; without one every
-download fails. FastF1 3.9 signs in with two environment variables, set before
-starting the command line or the interface:
+download fails. In the interface, sign in from the **🔑 Cuenta de F1 TV** box of
+the sidebar: the password is used once to get a temporary token, which FastF1
+stores (readable only by your user) until it expires; the password is not kept.
+On the command line, FastF1 3.9 signs in with two environment variables:
 
 ```bash
 export F1_USERNAME="you@example.com"     # Windows: set F1_USERNAME=you@example.com

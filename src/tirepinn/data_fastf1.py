@@ -274,9 +274,10 @@ def _load_failure(cfg: DataConfig, messages: list[str]) -> str:
         return (
             f"FastF1 could not download {cfg.year} {cfg.gp} {cfg.session}: Formula 1 now "
             "serves its timing data only to a signed-in account with an active F1 TV "
-            "subscription. Set the environment variables F1_USERNAME and F1_PASSWORD to that "
-            "account (FastF1 3.9 or newer) and start again. Races already in the cache still "
-            f"load without signing in. FastF1 said: {said}"
+            "subscription. Sign in to that account (in the interface: the F1 TV box of the "
+            "sidebar; on the command line: the environment variables F1_USERNAME and "
+            "F1_PASSWORD; FastF1 3.9 or newer) and start again. Races already in the cache "
+            f"still load without signing in. FastF1 said: {said}"
         )
     return (
         f"FastF1 could not download {cfg.year} {cfg.gp} {cfg.session} (FastF1 said: {said}). "
