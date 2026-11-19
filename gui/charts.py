@@ -308,7 +308,7 @@ def lstm_loss(history) -> go.Figure:
 def history_rmse(runs) -> go.Figure:
     """Test RMSE of each model across saved runs, oldest on the left."""
     runs = list(reversed(runs))
-    labels = [f"{r['saved_at']}<br>{r['data']}" for r in runs]
+    labels = [f"#{r['number']} · {r['saved_at']}<br>{r['data']}" for r in runs]
     models = [m for m in MODEL_COLORS if any(m in r["rmse"] for r in runs)]
     fig = go.Figure()
     for name in models:

@@ -27,6 +27,7 @@ circuit differently. See `_estimate_race_lap_effect`.
 from __future__ import annotations
 
 import hashlib
+import logging
 import pickle
 from collections.abc import Sequence
 from dataclasses import replace
@@ -225,15 +226,64 @@ def _is_green(track_status) -> bool:
     return str(track_status).strip() == "1"
 
 
+class _Warnings(logging.Handler):
+    """Collects what FastF1 logs while loading, to explain a failed load."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage().strip()
+        if message and message not in self.messages:
+            self.messages.append(message)
+
+
 def load_session(cfg: DataConfig):
-    """Download (or read from cache) the requested session."""
+    """Download (or read from cache) the requested session.
+
+    When FastF1 cannot download a session it only logs the reason and leaves
+    the session empty; the first access to its laps then fails with "The data
+    you are trying to access has not been loaded yet", which hides the cause.
+    So the load is checked here and the logged reason is raised instead.
+    """
     fastf1 = _require_fastf1()
     # FastF1 refuses to use a cache directory that does not exist yet.
     Path(cfg.cache_dir).mkdir(parents=True, exist_ok=True)
     fastf1.Cache.enable_cache(cfg.cache_dir)
     session = fastf1.get_session(cfg.year, cfg.gp, cfg.session)
-    session.load(laps=True, telemetry=True, weather=True, messages=False)
+    collected = _Warnings()
+    logger = logging.getLogger("fastf1")
+    logger.addHandler(collected)
+    try:
+        session.load(laps=True, telemetry=True, weather=True, messages=False)
+    finally:
+        logger.removeHandler(collected)
+    try:
+        session.laps  # noqa: B018 -- raises if the laps never arrived
+    except Exception as exc:
+        raise RuntimeError(_load_failure(cfg, collected.messages)) from exc
     return session
+
+
+def _load_failure(cfg: DataConfig, messages: list[str]) -> str:
+    said = " | ".join(messages[:6]) or "nothing"
+    if any("authenticat" in m.lower() or "credentials" in m.lower() for m in messages):
+        # Since late 2026 livetiming.formula1.com answers 401 without a signed-in
+        # F1 TV account; FastF1 3.9 signs in with these two variables.
+        return (
+            f"FastF1 could not download {cfg.year} {cfg.gp} {cfg.session}: Formula 1 now "
+            "serves its timing data only to a signed-in account with an active F1 TV "
+            "subscription. Set the environment variables F1_USERNAME and F1_PASSWORD to that "
+            "account (FastF1 3.9 or newer) and start again. Races already in the cache still "
+            f"load without signing in. FastF1 said: {said}"
+        )
+    return (
+        f"FastF1 could not download {cfg.year} {cfg.gp} {cfg.session} (FastF1 said: {said}). "
+        "Usual causes: no connection to the F1 servers (livetiming.formula1.com and "
+        "api.jolpi.ca), an outdated FastF1 (pip install -U fastf1), or a session that "
+        "has not been run yet"
+    )
 
 
 def build_dataset(cfg: DataConfig, phys: PhysicsConfig, session=None) -> StintDataset:

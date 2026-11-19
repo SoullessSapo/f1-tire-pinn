@@ -22,7 +22,7 @@ def _is_open(folder: Path) -> bool:
 def _label(run: dict) -> str:
     pinn = run["rmse"].get("PINN")
     rmse = f" · PINN {pinn:.3f} s" if pinn is not None else ""
-    return f"{run['saved_at']} · {run['data']}{rmse}"
+    return f"#{run['number']} · {run['saved_at']} · {run['data']}{rmse}"
 
 
 def _table(runs: list[dict]) -> pd.DataFrame:
@@ -31,6 +31,7 @@ def _table(runs: list[dict]) -> pd.DataFrame:
         mode = "Prácticas → carrera" if r["mode"] == "practicas" else (
             f"Stints al azar ({100 * r['test_fraction']:.0f} % prueba)")
         rows.append({
+            "#": r["number"],
             "": "● abierto" if _is_open(r["folder"]) else "",
             "Fecha": r["saved_at"],
             "Datos": r["data"],

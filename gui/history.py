@@ -115,7 +115,7 @@ def describe_data(s) -> str:
 
 
 def list_runs(base: Path) -> list[dict]:
-    """Every complete run under `base`, newest first, each with its `folder`."""
+    """Every complete run under `base`, newest first, numbered from the oldest."""
     if not base.exists():
         return []
     runs = []
@@ -126,7 +126,11 @@ def list_runs(base: Path) -> list[dict]:
             continue
         if (path.parent / RUN).exists():
             runs.append({**summary, "folder": path.parent})
-    return sorted(runs, key=lambda r: (r.get("saved_at", ""), str(r["folder"])), reverse=True)
+    # Folder names start with the date to the second: they sort in time order.
+    runs.sort(key=lambda r: r["folder"].name)
+    for number, run in enumerate(runs, 1):
+        run["number"] = number
+    return runs[::-1]
 
 
 def load_traces(folder: Path) -> dict | None:
@@ -143,7 +147,7 @@ def load_run(folder: Path) -> Result:
     folder = Path(folder)
     cfg = Config.from_json(str(folder / "config.json"))
     with open(folder / RUN, "rb") as fh:
-        payload = pickle.load(fh)  # noqa: S301 -- a file this interface wrote
+        payload = pickle.load(fh)  # only folders this interface wrote (see module doc)
     data: StintDataset = payload["data"]
     by_id = {x.stint_id: x for x in data.stints}
     train = StintDataset([by_id[i] for i in payload["train_ids"]], data.source,

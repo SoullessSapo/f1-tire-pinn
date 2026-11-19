@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 from job import Settings
 from session import ss
@@ -47,6 +49,13 @@ def render() -> Settings:
         s.n_stints = sb.number_input("Número de stints", 8, 400, key="stints", step=8)
         s.noise_delta_s = sb.number_input("Ruido en el tiempo de vuelta [s]", 0.0, 1.0, 0.06, 0.01)
     else:
+        if not (os.environ.get("F1_USERNAME") and os.environ.get("F1_PASSWORD")):
+            sb.warning(
+                "La F1 solo entrega sus datos a una cuenta con **F1 TV** activo. Para descargar "
+                "carreras nuevas, define `F1_USERNAME` y `F1_PASSWORD` antes de abrir la "
+                "interfaz. Las carreras ya guardadas en `cache/` cargan sin cuenta.",
+                icon="🔑",
+            )
         s.year = int(sb.number_input("Temporada", 2018, 2030, 2023))
         s.gps = tuple(sb.multiselect(
             "Carreras", CIRCUITS, default=["Monza"], accept_new_options=True,

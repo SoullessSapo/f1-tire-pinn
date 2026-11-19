@@ -238,6 +238,18 @@ sees the effect of compound and time.
 python run_train.py --source fastf1 --year 2023 --gp Monza Hungary Bahrain Spain
 ```
 
+Formula 1 now serves its timing data (livetiming.formula1.com) only to a
+signed-in account with an active F1 TV subscription; without one every
+download fails. FastF1 3.9 signs in with two environment variables, set before
+starting the command line or the interface:
+
+```bash
+export F1_USERNAME="you@example.com"     # Windows: set F1_USERNAME=you@example.com
+export F1_PASSWORD="..."                 # Windows: set F1_PASSWORD=...
+```
+
+Races already downloaded into `cache/` keep loading without signing in.
+
 Inference and latency measurement with a trained model:
 
 ```bash
