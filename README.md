@@ -177,7 +177,7 @@ Everything below can also be done from a browser app, without the command line:
 python run_gui.py          # or: streamlit run gui/app.py
 ```
 
-It opens at `http://localhost:8501` with seven tabs. Light and dark themes live in
+It opens at `http://localhost:8501` with eight tabs. Light and dark themes live in
 `.streamlit/config.toml` and follow the system setting; switch them from the
 app menu (⋮ → Settings).
 
@@ -186,6 +186,7 @@ app menu (⋮ → Settings).
 |---|---|
 | Datos | load the synthetic bench or FastF1 races; every stint's curve, the context distribution, a per-stint table (CSV download) and the hidden true states on the synthetic bench |
 | Entrenamiento | train the PINN and both baselines, with the loss terms (Adam and L-BFGS in separate panels), the physical parameters and the LSTM loss updating live; stop at any time |
+| Historial | every earlier run from the interface, in one table and one chart of test RMSE per model; pick one to see its loss and parameter curves and its log, and open it to browse it again in *Resultados*, *Carrera a carrera* and *Estrategia* |
 | Resultados | a convergence diagnosis (short training, parameters pinned at their bounds, invented cliffs, worse than the linear baseline, ...), the metrics table, training-versus-test error per model, error and physical-violation charts, per-stint RMSE and the learned parameters (with ground-truth recovery on the synthetic bench) |
 | Carrera a carrera | pick a race and step through its stints one by one: every model's prediction and RMSE, the PINN's latent states, and a grid of the whole race |
 | Estrategia | move the conditions and compound and get the wear curve, the lap at which `d` reaches `d_crit`, remaining life, a compound comparison and the decision map |
@@ -194,8 +195,12 @@ app menu (⋮ → Settings).
 
 The sidebar exposes the same options as `run_train.py` (plus learning rate,
 network size, collocation points and the data-term weight). It runs the same
-pipeline as the command line and writes the same files, to `outputs/gui` by
-default.
+pipeline as the command line and writes the same files, each run to a new
+folder under `outputs/gui` (named by date and data) so no run overwrites another.
+Beside the model and the figures, a run also saves what *Historial* needs to
+reopen it: `summary.json` (the table row), `traces.json` (the live curves and the
+log) and `run.pkl` (dataset, split, baselines and metrics). `run.pkl` is a
+pickle: only open folders the interface itself wrote.
 
 With FastF1 data, *Cómo evaluar* offers two splits:
 
