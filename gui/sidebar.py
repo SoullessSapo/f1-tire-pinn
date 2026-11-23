@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 from job import Settings
 from session import ss
 
+from tirepinn import f1account
 from tirepinn.config import CONTEXT_NAMES, LEARNABLE_PARAMS, REAL_DATA_FREE_PARAMS
 
 PRESETS = {
@@ -28,6 +31,43 @@ def _apply_preset() -> None:
         )
 
 
+def _f1_account(sb) -> None:
+    """Sign in to F1 TV from the sidebar. Only FastF1's temporary token is kept."""
+    state = f1account.status()
+    from_env = bool(os.environ.get("F1_USERNAME") and os.environ.get("F1_PASSWORD"))
+    title = "🔑 Cuenta de F1 TV" + (" · sesión iniciada" if state.signed_in else "")
+    with sb.expander(title, expanded=not (state.signed_in or from_env)):
+        if state.problem:
+            st.warning(state.problem)
+            return
+        if state.signed_in:
+            st.success(f"Sesión iniciada hasta el {state.expires_text()}.")
+            if st.button("Cerrar sesión", width="stretch"):
+                f1account.sign_out()
+                st.rerun()
+            return
+        st.caption(
+            "La F1 solo entrega sus datos de tiempos a una cuenta con **F1 TV** activo. La "
+            "contraseña se usa una vez para pedir un permiso temporal y no se guarda. Las "
+            "carreras ya descargadas en `cache/` cargan sin cuenta."
+        )
+        if from_env:
+            st.caption("`F1_USERNAME` y `F1_PASSWORD` están definidas: FastF1 las usará al "
+                       "descargar aunque no inicies sesión aquí.")
+        with st.form("f1-login", clear_on_submit=True, border=False):
+            user = st.text_input("Correo", autocomplete="username")
+            password = st.text_input("Contraseña", type="password",
+                                     autocomplete="current-password")
+            if st.form_submit_button("Iniciar sesión", type="primary"):
+                try:
+                    with st.spinner("Iniciando sesión en F1…"):
+                        f1account.sign_in(user, password)
+                except RuntimeError as exc:
+                    st.error(f"No se pudo iniciar sesión: {exc}")
+                else:
+                    st.rerun()
+
+
 def render() -> Settings:
     st.sidebar.markdown(
         '<div class="brand"><div class="bar"></div><div><div class="name">🏎️ F1 Tire PINN</div>'
@@ -47,6 +87,7 @@ def render() -> Settings:
         s.n_stints = sb.number_input("Número de stints", 8, 400, key="stints", step=8)
         s.noise_delta_s = sb.number_input("Ruido en el tiempo de vuelta [s]", 0.0, 1.0, 0.06, 0.01)
     else:
+        _f1_account(sb)
         s.year = int(sb.number_input("Temporada", 2018, 2030, 2023))
         s.gps = tuple(sb.multiselect(
             "Carreras", CIRCUITS, default=["Monza"], accept_new_options=True,

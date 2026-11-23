@@ -305,6 +305,25 @@ def lstm_loss(history) -> go.Figure:
     return _layout(fig, 300, title="Pérdida de la LSTM (línea base)")
 
 
+def history_rmse(runs) -> go.Figure:
+    """Test RMSE of each model across saved runs, oldest on the left."""
+    runs = list(reversed(runs))
+    labels = [f"#{r['number']} · {r['saved_at']}<br>{r['data']}" for r in runs]
+    models = [m for m in MODEL_COLORS if any(m in r["rmse"] for r in runs)]
+    fig = go.Figure()
+    for name in models:
+        fig.add_trace(go.Bar(
+            x=labels, y=[r["rmse"].get(name) for r in runs], name=name,
+            marker=dict(color=MODEL_COLORS[name]),
+            hovertemplate="%{y:.3f} s<extra>" + name + "</extra>",
+        ))
+    fig.update_yaxes(title="RMSE en prueba [s]")
+    fig = _layout(fig, 380, title="Error de cada modelo en cada entrenamiento (menor es mejor)",
+                  barmode="group")
+    fig.update_layout(hovermode="closest", bargap=0.3, bargroupgap=0.05)
+    return fig
+
+
 # ----------------------------------------------------------------------
 # Results
 # ----------------------------------------------------------------------
