@@ -177,7 +177,7 @@ Everything below can also be done from a browser app, without the command line:
 python run_gui.py          # or: streamlit run gui/app.py
 ```
 
-It opens at `http://localhost:8501` with eight tabs. Light and dark themes live in
+It opens at `http://localhost:8501` with seven tabs. Light and dark themes live in
 `.streamlit/config.toml` and follow the system setting; switch them from the
 app menu (⋮ → Settings).
 
@@ -190,8 +190,7 @@ app menu (⋮ → Settings).
 | Resultados | a convergence diagnosis (short training, parameters pinned at their bounds, invented cliffs, worse than the linear baseline, ...), the metrics table, training-versus-test error per model, error and physical-violation charts, per-stint RMSE and the learned parameters (with ground-truth recovery on the synthetic bench) |
 | Carrera a carrera | pick a race and step through its stints one by one: every model's prediction and RMSE, the PINN's latent states, and a grid of the whole race |
 | Estrategia | move the conditions and compound and get the wear curve, the lap at which `d` reaches `d_crit`, remaining life, a compound comparison and the decision map |
-| Figuras | the six report PNGs of any trained model |
-| Modelos guardados | reopen any model under `outputs/` to use it in *Estrategia* without retraining |
+| Archivo | *Modelos guardados*: reopen any model under `outputs/` to use it in *Estrategia* without retraining; *Figuras*: the six report PNGs of any trained model |
 
 The sidebar exposes the same options as `run_train.py` (plus learning rate,
 network size, collocation points and the data-term weight). It runs the same
@@ -202,10 +201,15 @@ reopen it: `summary.json` (the table row), `traces.json` (the live curves and th
 log) and `run.pkl` (dataset, split, baselines and metrics). `run.pkl` is a
 pickle: only open folders the interface itself wrote.
 
-With FastF1 data, *Cómo evaluar* offers two splits:
+With FastF1 data, *Cómo evaluar* offers three splits:
 
 - **Stints al azar**: a random fraction of the stints of the chosen sessions is
-  held out, as on the command line.
+  held out, as on the command line. The test stints come from the same races
+  as the training ones, so this error is the optimistic one.
+- **Una carrera fuera**: train on every chosen race but one (*Carrera que se
+  predice*) and test on that one, which the model never sees. This is the
+  new-circuit test: the leave-one-race-out validation of the paper, one fold at
+  a time. It needs at least two races.
 - **Prácticas → carrera**: train on the practice sessions (all of FP1, FP2 and FP3
   by default; sessions a weekend lacks are skipped) and predict the race of the same weekends. A race stint only gives the model what
   is known before it is run: its compound, its length and the track

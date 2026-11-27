@@ -43,6 +43,8 @@ def run_folder(base: str | Path, settings) -> Path:
     else:
         what = "-".join(g[:3] for g in settings.gps) or "fastf1"
         what += "-practicas" if settings.practice_to_race else f"-{settings.session}"
+        if settings.race_held_out:
+            what += f"-sin-{settings.test_gp[:3]}"
     slug = re.sub(r"[^A-Za-z0-9-]+", "", what).lower()
     folder = Path(base) / f"{time.strftime('%Y%m%d-%H%M%S')}_{slug}"
     n = 1
@@ -60,8 +62,10 @@ def save_run(job: Job, result: Result) -> None:
         "saved_at": time.strftime("%Y-%m-%d %H:%M"),
         "source": s.source,
         "data": describe_data(s),
-        "mode": "practicas" if s.practice_to_race else "azar",
-        "test_fraction": None if s.practice_to_race else s.test_fraction,
+        "mode": "practicas" if s.practice_to_race else ("carrera" if s.race_held_out else "azar"),
+        "test_fraction": s.test_fraction if s.split_mode == "random" or s.source == "synthetic"
+        else None,
+        "test_gp": s.test_gp if s.race_held_out else None,
         "adam_iters": s.adam_iters,
         "lbfgs_iters": s.lbfgs_iters,
         "activation": s.activation,
@@ -111,7 +115,8 @@ def describe_data(s) -> str:
     races = ", ".join(s.gps)
     session = "+".join(s.practice_sessions) + " → R" if s.practice_to_race else s.session
     drivers = f" · {' '.join(s.drivers)}" if s.drivers else ""
-    return f"{s.year} {races} · {session}{drivers}"
+    held_out = f" · predice {s.test_gp}" if s.race_held_out else ""
+    return f"{s.year} {races} · {session}{drivers}{held_out}"
 
 
 def list_runs(base: Path) -> list[dict]:

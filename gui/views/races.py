@@ -33,8 +33,8 @@ def render() -> None:
                               f"({sum(s.stint_id in test_ids for s in by_race[r])} de {test_label})",
     )
     options = ["Todos", f"Solo {test_label}", f"Solo {train_label}"]
-    # Practice -> race is about the race: open on it.
-    default = options[1] if res.cfg.data.train_sessions else "Todos"
+    # Practice -> race and a held-out race are about the unseen race: open on it.
+    default = options[1] if res.cfg.data.train_sessions or res.cfg.data.test_gp else "Todos"
     which = c2.segmented_control("Stints", options, default=default, key="race_which") or default
     stints = [
         s for s in by_race[race]

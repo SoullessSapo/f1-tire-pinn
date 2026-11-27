@@ -31,12 +31,19 @@ def _apply_preset() -> None:
         )
 
 
+def _step(sb, n: int, title: str, hint: str) -> None:
+    """A numbered step header, styled by ui.STYLE (.step)."""
+    sb.markdown(f'<div class="step"><span class="n">{n}</span><div><div class="t">{title}</div>'
+                f'<div class="h">{hint}</div></div></div>', unsafe_allow_html=True)
+
+
 def _f1_account(sb) -> None:
     """Sign in to F1 TV from the sidebar. Only FastF1's temporary token is kept."""
     state = f1account.status()
     from_env = bool(os.environ.get("F1_USERNAME") and os.environ.get("F1_PASSWORD"))
-    title = "🔑 Cuenta de F1 TV" + (" · sesión iniciada" if state.signed_in else "")
-    with sb.expander(title, expanded=not (state.signed_in or from_env)):
+    title = "🔑 Cuenta de F1 TV · " + ("sesión iniciada" if state.signed_in else (
+        "desde variables de entorno" if from_env else "sin sesión"))
+    with sb.expander(title, expanded=False):
         if state.problem:
             st.warning(state.problem)
             return
@@ -76,7 +83,7 @@ def render() -> Settings:
     )
 
     sb = st.sidebar.container(border=True)
-    sb.subheader("1 · Datos")
+    _step(sb, 1, "Datos", "qué carreras y cómo evaluar")
     source = sb.radio(
         "Fuente", ["synthetic", "fastf1"], horizontal=True,
         format_func=lambda s: "Sintético (con verdad)" if s == "synthetic" else "F1 real (FastF1)",
@@ -95,14 +102,27 @@ def render() -> Settings:
                  "apenas ve algo más que el efecto del compuesto.",
         ))
         s.split_mode = sb.radio(
-            "Cómo evaluar", ["random", "practice"],
+            "Cómo evaluar", ["random", "race", "practice"],
             format_func=lambda m: {"random": "Stints al azar",
+                                   "race": "Una carrera fuera",
                                    "practice": "Prácticas → carrera"}[m],
-            help="**Stints al azar**: se aparta una fracción de stints de las sesiones elegidas.\n\n"
+            help="**Stints al azar**: se aparta una fracción de stints de las sesiones elegidas; "
+                 "los de prueba son de las mismas carreras que los de entrenamiento.\n\n"
+                 "**Una carrera fuera**: se entrena con todas las carreras menos una y se predice "
+                 "esa, que el modelo nunca vio. Es la prueba de un circuito nuevo.\n\n"
                  "**Prácticas → carrera**: se entrena solo con las prácticas y se predice la "
                  "carrera del mismo fin de semana, dándole solo el compuesto, la duración de cada "
                  "stint y la temperatura de pista. La telemetría de carrera no se usa.",
         )
+        if s.split_mode == "race":
+            if len(s.gps) < 2:
+                sb.warning("Elige al menos dos carreras: una para predecir y el resto para entrenar.")
+            else:
+                s.test_gp = sb.selectbox(
+                    "Carrera que se predice", s.gps, index=len(s.gps) - 1,
+                    help="Ningún stint de esta carrera se usa para entrenar: el modelo se "
+                         "entrena con las demás y se mide aquí.",
+                )
         if s.split_mode == "practice":
             s.practice_sessions = tuple(sb.multiselect(
                 "Prácticas para entrenar", ["FP1", "FP2", "FP3"], default=["FP1", "FP2", "FP3"],
@@ -119,32 +139,33 @@ def render() -> Settings:
             )
         else:
             s.session = sb.selectbox("Sesión", ["R", "S", "FP1", "FP2", "FP3", "Q"])
-        drivers = sb.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")
+        adv = sb.expander("Opciones avanzadas de datos")
+        drivers = adv.text_input("Pilotos (vacío = todos)", placeholder="VER HAM LEC")
         s.drivers = tuple(d.upper() for d in drivers.split())
         if s.drivers:
-            sb.caption(
+            adv.caption(
                 "Se entrena solo con estos pilotos. El efecto del combustible y de la pista se "
                 "mide igualmente con todos: necesita comparar coches."
             )
-        s.aggregate_context = tuple(sb.multiselect(
+        s.aggregate_context = tuple(adv.multiselect(
             "Colapsar a la mediana de la carrera", CONTEXT_NAMES, default=["q_fric", "load"],
             help="Estos proxies varían mucho dentro de un mismo circuito sin predecir nada: "
                  "es ruido de medida. Ver dataset.aggregate_context_by_race.",
         ))
-        s.min_stint_laps = int(sb.number_input(
+        s.min_stint_laps = int(adv.number_input(
             "Vueltas mínimas por stint", 4, 30, 6 if s.split_mode == "practice" else 8,
             help="Las tandas de práctica son cortas: con 8 vueltas mínimas se pierden muchas.",
         ))
-        s.free_params = tuple(sb.multiselect(
+        s.free_params = tuple(adv.multiselect(
             "Parámetros físicos a estimar", LEARNABLE_PARAMS, default=list(REAL_DATA_FREE_PARAMS),
             help="El resto se fija en los valores calibrados en el banco sintético.",
         ))
-    if not s.practice_to_race:
+    if s.source == "synthetic" or s.split_mode == "random":
         s.test_fraction = sb.slider("Fracción de stints de prueba", 0.1, 0.5, 0.25, 0.05)
     s.seed = int(sb.number_input("Semilla", 0, 10_000, 42))
 
     sb = st.sidebar.container(border=True)
-    sb.subheader("2 · Entrenamiento")
+    _step(sb, 2, "Entrenamiento", "cuánto entrena la red")
     ss.setdefault("adam", 15000)
     ss.setdefault("lbfgs", 3000)
     ss.setdefault("lstm", 800)
@@ -156,7 +177,7 @@ def render() -> Settings:
     if s.train_baselines:
         s.lstm_epochs = int(sb.number_input("Épocas LSTM", 10, 10_000, key="lstm", step=50))
 
-    with sb.expander("Avanzado: red y pérdida"):
+    with sb.expander("Avanzado: red, pérdida y carpeta"):
         s.lr = float(st.number_input("Tasa de aprendizaje", 1e-5, 1e-1, 1e-3, format="%.0e"))
         s.hidden_width = int(st.number_input("Neuronas por capa", 8, 512, 64, 8))
         s.hidden_depth = int(st.number_input("Capas ocultas", 1, 10, 4))
@@ -173,8 +194,6 @@ def render() -> Settings:
             "Peso del término de datos (ritmo)", 0.1, 500.0, default_w, 0.5,
             help="20 en sintético, 5 con datos reales: el ruido de una vuelta real es ~10x mayor.",
         ))
-
-    sb = st.sidebar.container(border=True)
-    sb.subheader("3 · Salida")
-    s.out_dir = sb.text_input("Carpeta de resultados", "outputs/gui")
+        s.out_dir = st.text_input("Carpeta de resultados", "outputs/gui",
+                                  help="Cada entrenamiento se guarda en una carpeta nueva dentro.")
     return s

@@ -28,8 +28,12 @@ def _label(run: dict) -> str:
 def _table(runs: list[dict]) -> pd.DataFrame:
     rows = []
     for r in runs:
-        mode = "Prácticas → carrera" if r["mode"] == "practicas" else (
-            f"Stints al azar ({100 * r['test_fraction']:.0f} % prueba)")
+        if r["mode"] == "practicas":
+            mode = "Prácticas → carrera"
+        elif r["mode"] == "carrera":
+            mode = f"Carrera fuera ({r.get('test_gp')})"
+        else:
+            mode = f"Stints al azar ({100 * r['test_fraction']:.0f} % prueba)"
         rows.append({
             "#": r["number"],
             "": "● abierto" if _is_open(r["folder"]) else "",
@@ -53,7 +57,7 @@ def render() -> None:
               "Cada entrenamiento que lances desde <b>🧠 Entrenamiento</b> se guarda aquí con "
               "sus métricas, sus curvas y sus predicciones, para volver a abrirlo cuando quieras.")
         st.caption("Los entrenamientos hechos antes de esta versión no guardaban sus resultados; "
-                   "sus modelos siguen disponibles en **💾 Modelos guardados**.")
+                   "sus modelos siguen disponibles en **🗄️ Archivo** → pestaña **Modelos guardados**.")
         return
 
     st.write(f"**{len(runs)} entrenamientos guardados.** Elige uno para ver cómo entrenó y "

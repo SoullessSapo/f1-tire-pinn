@@ -43,8 +43,7 @@ TABS = (
     ("📈 Resultados", results.render, False),
     ("🔎 Carrera a carrera", races.render, False),
     ("🏁 Estrategia", strategy.render, False),
-    ("🖼️ Figuras", saved.render_figures, False),
-    ("💾 Modelos guardados", saved.render_models, False),
+    ("🗄️ Archivo", saved.render_archive, False),
 )
 
 

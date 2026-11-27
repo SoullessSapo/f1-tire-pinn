@@ -1,4 +1,4 @@
-"""🖼️ Figuras and 💾 Modelos guardados: what earlier runs left on disk."""
+"""🗄️ Archivo: saved models and the report figures earlier runs left on disk."""
 
 from __future__ import annotations
 
@@ -85,3 +85,11 @@ def render_models() -> None:
         c2.code(report.read_text(encoding="utf-8"), language=None)
     with st.expander("config.json"):
         st.json(asdict(cfg), expanded=False)
+
+
+def render_archive() -> None:
+    models, figures = st.tabs(["💾 Modelos guardados", "🖼️ Figuras"])
+    with models:
+        render_models()
+    with figures:
+        render_figures()
