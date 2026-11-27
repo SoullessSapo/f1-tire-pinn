@@ -16,25 +16,71 @@ TRUTH = GROUND_TRUTH.as_dict()
 # banner and a little more presence for the tabs.
 STYLE = """
 <style>
-.hero {
-  border-radius: 0.8rem;
-  padding: 1.1rem 1.4rem 1rem;
-  margin-bottom: 0.6rem;
-  background: linear-gradient(110deg, #15151e 0%, #26263a 62%, #e10600 160%);
-  color: #ffffff;
-  border-left: 6px solid #e10600;
+/* Page: less empty space above the content. */
+[data-testid="stMainBlockContainer"] { padding-top: 2.2rem; }
+
+/* Top bar: title on the left, the pipeline's progress on the right. */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.8rem 1.4rem;
+  flex-wrap: wrap; padding: 0.85rem 1.2rem; margin-bottom: 0.5rem; border-radius: 0.8rem;
+  background: linear-gradient(100deg, #15151e 0%, #22222e 68%, #3b1414 100%);
+  border-left: 5px solid #e10600; color: #ffffff;
 }
-.hero h1 { color: #ffffff; font-size: 1.9rem; margin: 0; padding: 0; line-height: 1.2; }
-.hero p { color: #c9c9d4; margin: 0.25rem 0 0.7rem; font-size: 0.98rem; }
-.hero .chip {
-  display: inline-block; margin: 0 0.4rem 0.3rem 0; padding: 0.15rem 0.7rem;
-  border-radius: 999px; font-size: 0.85rem; border: 1px solid #4a4a5e; color: #c9c9d4;
+.topbar .name { font-size: 1.45rem; font-weight: 700; line-height: 1.15; color: #ffffff; }
+.topbar .sub { font-size: 0.86rem; color: #b8b8c6; margin-top: 0.1rem; }
+.stepper { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0; padding: 0; }
+.stepper .s {
+  display: inline-flex; align-items: center; gap: 0.45rem; padding: 0.25rem 0.75rem 0.25rem 0.3rem;
+  border-radius: 999px; border: 1px solid #3b3b4c; color: #b8b8c6; font-size: 0.85rem;
 }
-.hero .chip.on { border-color: #e10600; background: rgba(225, 6, 0, 0.18); color: #ffffff; }
-.stTabs [data-baseweb="tab"] p { font-size: 1.02rem; font-weight: 600; }
+.stepper .s .n {
+  width: 1.4rem; height: 1.4rem; border-radius: 50%; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 0.74rem; font-weight: 700; background: #2d2d3b; color: #d8d8e2;
+}
+.stepper .s.done { color: #ffffff; border-color: #2f6b45; }
+.stepper .s.done .n { background: #1f9d55; color: #ffffff; }
+.stepper .s.active { color: #ffffff; border-color: #e10600; background: rgba(225, 6, 0, 0.18); }
+.stepper .s.active .n { background: #e10600; color: #ffffff; }
+.stepper .s.extra { border-style: dashed; color: #ffffff; }
+
+/* Tabs as pills. Older Streamlit draws tabs with baseweb, newer with react-aria
+   (data-testid="stTab"): both are styled. */
+.stTabs [role="tablist"] { gap: 0.4rem; flex-wrap: wrap; border-bottom: none; box-shadow: none; }
+.stTabs [data-testid="stTab"], .stTabs [data-baseweb="tab"] {
+  height: auto; padding: 0.38rem 0.95rem; border-radius: 999px;
+  border: 1px solid rgba(128, 128, 140, 0.3); box-shadow: none;
+}
+.stTabs [data-testid="stTab"] p, .stTabs [data-baseweb="tab"] p { font-size: 0.98rem; font-weight: 600; }
+.stTabs [data-testid="stTab"][aria-selected="true"],
+.stTabs [data-baseweb="tab"][aria-selected="true"] { background: #e10600; border-color: #e10600; }
+.stTabs [data-testid="stTab"][aria-selected="true"] p,
+.stTabs [data-baseweb="tab"][aria-selected="true"] p { color: #ffffff; }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
+
+/* Metric tiles: small caps label, figures that line up. */
+[data-testid="stMetricLabel"] p {
+  text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.74rem; opacity: 0.75;
+}
+[data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }
+
+/* Sidebar steps. */
+.brand { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.2rem; }
+.brand .bar { width: 6px; height: 2.1rem; border-radius: 3px; background: #e10600; }
+.brand .name { font-size: 1.35rem; font-weight: 700; line-height: 1.1; }
+.brand .sub { font-size: 0.82rem; opacity: 0.7; }
+.step { display: flex; align-items: center; gap: 0.6rem; margin: 0.1rem 0 0.3rem; }
+.step .n {
+  width: 1.7rem; height: 1.7rem; flex: none; border-radius: 50%; background: #e10600; color: #ffffff;
+  display: inline-flex; align-items: center; justify-content: center; font-weight: 700;
+}
+.step .t { font-size: 1.12rem; font-weight: 700; line-height: 1.1; }
+.step .h { font-size: 0.8rem; opacity: 0.65; }
+
+/* Empty states and tyre badges. */
 .empty {
   text-align: center; padding: 2.6rem 1rem 2.2rem; margin: 0.4rem 0 1rem;
   border: 1px dashed rgba(128, 128, 140, 0.45); border-radius: 0.8rem;
+  background: linear-gradient(180deg, rgba(225, 6, 0, 0.04), rgba(225, 6, 0, 0));
 }
 .empty .icon { font-size: 2.6rem; line-height: 1; margin-bottom: 0.6rem; }
 .empty h3 { margin: 0 0 0.3rem; padding: 0; font-size: 1.25rem; }
@@ -43,10 +89,6 @@ STYLE = """
   display: inline-block; padding: 0 0.6rem; border: 2px solid; border-radius: 999px;
   font-size: 0.85rem; font-weight: 700; vertical-align: middle;
 }
-.brand { display: flex; align-items: center; gap: 0.6rem; margin: 0 0 0.2rem; }
-.brand .bar { width: 6px; height: 2.1rem; border-radius: 3px; background: #e10600; }
-.brand .name { font-size: 1.35rem; font-weight: 700; line-height: 1.1; }
-.brand .sub { font-size: 0.82rem; opacity: 0.7; }
 </style>
 """
 
@@ -106,20 +148,27 @@ def phase_counter(job: Job) -> str:
 
 
 def header() -> None:
-    """Banner with the state of the pipeline: what is loaded, trained, open."""
+    """Top bar: the title, and where the pipeline stands (data, training, results)."""
     job: Job | None = ss.job
+    loading = busy() and job.kind == "data"
+    training = busy() and job.kind == "train"
+
+    def state(done: bool, active: bool) -> str:
+        return "active" if active else ("done" if done else "")
+
     steps = [
-        ("📥 Datos cargados", ss.data is not None),
-        ("🧠 Entrenando", busy() and job.kind == "train"),
-        ("✅ Modelo entrenado", ss.result is not None),
-        ("💾 Modelo abierto", ss.loaded is not None),
+        ("Datos", state(ss.data is not None or ss.result is not None, loading)),
+        ("Entrenamiento", state(ss.result is not None, training)),
+        ("Resultados", state(ss.result is not None and not training, False)),
     ]
-    chips = "".join(f'<span class="chip{" on" if on else ""}">{label}</span>' for label, on in steps)
-    st.markdown(
-        f"""<div class="hero"><h1>Degradación de neumáticos F1 · PINN</h1>
-        <p>Red neuronal informada por la física: ecuaciones térmica y de desgaste + datos de vuelta</p>
-        {chips}</div>""",
-        unsafe_allow_html=True,
+    html = "".join(f'<span class="s {cls}"><span class="n">{"✓" if cls == "done" else i}</span>'
+                   f"{label}</span>" for i, (label, cls) in enumerate(steps, 1))
+    if ss.loaded is not None:
+        html += '<span class="s extra"><span class="n">💾</span>Modelo abierto</span>'
+    st.html(
+        '<div class="topbar"><div><div class="name">Degradación de neumáticos F1 · PINN</div>'
+        '<div class="sub">Red neuronal informada por la física: ecuaciones térmica y de desgaste '
+        f'más datos de vuelta</div></div><div class="stepper">{html}</div></div>'
     )
 
 

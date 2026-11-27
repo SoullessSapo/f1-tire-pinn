@@ -57,7 +57,7 @@ def render() -> None:
               "Cada entrenamiento que lances desde <b>🧠 Entrenamiento</b> se guarda aquí con "
               "sus métricas, sus curvas y sus predicciones, para volver a abrirlo cuando quieras.")
         st.caption("Los entrenamientos hechos antes de esta versión no guardaban sus resultados; "
-                   "sus modelos siguen disponibles en **💾 Modelos guardados**.")
+                   "sus modelos siguen disponibles en **🗄️ Archivo** → pestaña **Modelos guardados**.")
         return
 
     st.write(f"**{len(runs)} entrenamientos guardados.** Elige uno para ver cómo entrenó y "

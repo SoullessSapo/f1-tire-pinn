@@ -28,7 +28,7 @@ def render() -> None:
     choices = _strategy_model()
     if not choices:
         empty("🏁", "Simulador de estrategia",
-              "Entrena un modelo o abre uno en <b>Modelos guardados</b> para usarlo aquí.")
+              "Entrena un modelo o abre uno en <b>Archivo → Modelos guardados</b> para usarlo aquí.")
         return
     name = st.radio("Modelo", list(choices), horizontal=True)
     pinn, cfg = choices[name]
