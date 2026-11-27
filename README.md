@@ -202,10 +202,15 @@ reopen it: `summary.json` (the table row), `traces.json` (the live curves and th
 log) and `run.pkl` (dataset, split, baselines and metrics). `run.pkl` is a
 pickle: only open folders the interface itself wrote.
 
-With FastF1 data, *Cómo evaluar* offers two splits:
+With FastF1 data, *Cómo evaluar* offers three splits:
 
 - **Stints al azar**: a random fraction of the stints of the chosen sessions is
-  held out, as on the command line.
+  held out, as on the command line. The test stints come from the same races
+  as the training ones, so this error is the optimistic one.
+- **Una carrera fuera**: train on every chosen race but one (*Carrera que se
+  predice*) and test on that one, which the model never sees. This is the
+  new-circuit test: the leave-one-race-out validation of the paper, one fold at
+  a time. It needs at least two races.
 - **Prácticas → carrera**: train on the practice sessions (all of FP1, FP2 and FP3
   by default; sessions a weekend lacks are skipped) and predict the race of the same weekends. A race stint only gives the model what
   is known before it is run: its compound, its length and the track

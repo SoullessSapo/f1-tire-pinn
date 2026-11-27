@@ -28,8 +28,12 @@ def _label(run: dict) -> str:
 def _table(runs: list[dict]) -> pd.DataFrame:
     rows = []
     for r in runs:
-        mode = "Prácticas → carrera" if r["mode"] == "practicas" else (
-            f"Stints al azar ({100 * r['test_fraction']:.0f} % prueba)")
+        if r["mode"] == "practicas":
+            mode = "Prácticas → carrera"
+        elif r["mode"] == "carrera":
+            mode = f"Carrera fuera ({r.get('test_gp')})"
+        else:
+            mode = f"Stints al azar ({100 * r['test_fraction']:.0f} % prueba)"
         rows.append({
             "#": r["number"],
             "": "● abierto" if _is_open(r["folder"]) else "",

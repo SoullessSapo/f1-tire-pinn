@@ -56,7 +56,9 @@ class Settings:
     min_stint_laps: int = 8
     # "random": hold out a random fraction of stints. "practice": train on the
     # practice sessions below and test on the race of the same weekends.
+    # "race": train on every race but `test_gp` and test on that one.
     split_mode: str = "random"
+    test_gp: str = ""
     practice_sessions: tuple[str, ...] = ("FP1", "FP2", "FP3")
     practice_fresh_only: bool = False
 
@@ -79,12 +81,18 @@ class Settings:
             return ("synthetic", self.n_stints, self.noise_delta_s, self.seed)
         return (
             "fastf1", self.year, self.gps, self.session, self.drivers, self.aggregate_context,
-            self.min_stint_laps, self.split_mode, self.practice_sessions, self.practice_fresh_only,
+            # The held-out race is chosen after loading: "random" and "race" share the data.
+            self.min_stint_laps, "practice" if self.practice_to_race else "races",
+            self.practice_sessions, self.practice_fresh_only,
         )
 
     @property
     def practice_to_race(self) -> bool:
         return self.source == "fastf1" and self.split_mode == "practice"
+
+    @property
+    def race_held_out(self) -> bool:
+        return self.source == "fastf1" and self.split_mode == "race"
 
     def as_args(self) -> argparse.Namespace:
         """The same namespace `run_train.parse_args()` would produce."""
@@ -120,6 +128,8 @@ class Settings:
         if self.practice_to_race:
             cfg.data.session = "R"
             cfg.data.train_sessions = tuple(self.practice_sessions)
+        if self.race_held_out:
+            cfg.data.test_gp = self.test_gp
         if self.w_data_delta is not None:
             cfg.pinn.w_data_delta = self.w_data_delta
         return cfg
@@ -320,6 +330,10 @@ class Job(threading.Thread):
             train = StintDataset([x for x in data.stints if x.stint_id not in test_ids], data.source)
             test = StintDataset([x for x in data.stints if x.stint_id in test_ids], data.source)
             self.log(f"Prácticas -> carrera: {len(train)} stints de práctica / {len(test)} de carrera")
+        elif s.race_held_out:
+            train, test = split_by_race(data, s.gps, s.test_gp)
+            self.log(f"Carrera fuera: {len(train)} stints de las otras carreras / "
+                     f"{len(test)} de {s.test_gp}, que no se usa para entrenar")
         else:
             train, test = data.split(cfg.data.test_fraction, seed=s.seed)
             self.log(f"División por stint: {len(train)} entrenamiento / {len(test)} prueba")
@@ -391,6 +405,29 @@ class Job(threading.Thread):
             self.log("Guardado en el historial: se puede reabrir desde 🗂️ Historial")
         except Exception as exc:  # the run itself is fine; only reopening it later is lost
             self.log(f"No se pudo guardar en el historial: {type(exc).__name__}: {exc}")
+
+
+def split_by_race(data: StintDataset, gps, test_gp: str) -> tuple[StintDataset, StintDataset]:
+    """Every stint of `test_gp` to the test set, the other races to training.
+
+    Multi-race stint ids start with the first three letters of their race
+    (see data_fastf1.build_multi_dataset), which is what tells the races apart.
+    """
+    if len(gps) < 2 or test_gp not in gps:
+        raise RuntimeError("Para dejar una carrera fuera elige al menos dos carreras y cuál predecir.")
+    prefixes = [f"{gp[:3].upper()}-" for gp in gps]
+    if len(set(prefixes)) < len(prefixes):
+        raise RuntimeError("Dos de las carreras elegidas empiezan por las mismas tres letras "
+                           f"({', '.join(gps)}): no se pueden separar. Quita una de ellas.")
+    prefix = f"{test_gp[:3].upper()}-"
+    test = [x for x in data.stints if x.stint_id.startswith(prefix)]
+    train = [x for x in data.stints if not x.stint_id.startswith(prefix)]
+    if not test:
+        raise RuntimeError(f"{test_gp} no dio stints válidos: elige otra carrera para predecir.")
+    if not train:
+        raise RuntimeError(f"Solo {test_gp} dio stints válidos: no queda nada para entrenar.")
+    return (StintDataset(train, data.source, dict(data.meta, split="train")),
+            StintDataset(test, data.source, dict(data.meta, split="test")))
 
 
 def _practice_to_race_data(cfg: Config, s: Settings) -> StintDataset:

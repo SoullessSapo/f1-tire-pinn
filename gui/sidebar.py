@@ -95,14 +95,27 @@ def render() -> Settings:
                  "apenas ve algo más que el efecto del compuesto.",
         ))
         s.split_mode = sb.radio(
-            "Cómo evaluar", ["random", "practice"],
+            "Cómo evaluar", ["random", "race", "practice"],
             format_func=lambda m: {"random": "Stints al azar",
+                                   "race": "Una carrera fuera",
                                    "practice": "Prácticas → carrera"}[m],
-            help="**Stints al azar**: se aparta una fracción de stints de las sesiones elegidas.\n\n"
+            help="**Stints al azar**: se aparta una fracción de stints de las sesiones elegidas; "
+                 "los de prueba son de las mismas carreras que los de entrenamiento.\n\n"
+                 "**Una carrera fuera**: se entrena con todas las carreras menos una y se predice "
+                 "esa, que el modelo nunca vio. Es la prueba de un circuito nuevo.\n\n"
                  "**Prácticas → carrera**: se entrena solo con las prácticas y se predice la "
                  "carrera del mismo fin de semana, dándole solo el compuesto, la duración de cada "
                  "stint y la temperatura de pista. La telemetría de carrera no se usa.",
         )
+        if s.split_mode == "race":
+            if len(s.gps) < 2:
+                sb.warning("Elige al menos dos carreras: una para predecir y el resto para entrenar.")
+            else:
+                s.test_gp = sb.selectbox(
+                    "Carrera que se predice", s.gps, index=len(s.gps) - 1,
+                    help="Ningún stint de esta carrera se usa para entrenar: el modelo se "
+                         "entrena con las demás y se mide aquí.",
+                )
         if s.split_mode == "practice":
             s.practice_sessions = tuple(sb.multiselect(
                 "Prácticas para entrenar", ["FP1", "FP2", "FP3"], default=["FP1", "FP2", "FP3"],
@@ -139,7 +152,7 @@ def render() -> Settings:
             "Parámetros físicos a estimar", LEARNABLE_PARAMS, default=list(REAL_DATA_FREE_PARAMS),
             help="El resto se fija en los valores calibrados en el banco sintético.",
         ))
-    if not s.practice_to_race:
+    if s.source == "synthetic" or s.split_mode == "random":
         s.test_fraction = sb.slider("Fracción de stints de prueba", 0.1, 0.5, 0.25, 0.05)
     s.seed = int(sb.number_input("Semilla", 0, 10_000, 42))
 

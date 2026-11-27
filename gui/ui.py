@@ -91,7 +91,11 @@ def compound_badge(compound: str) -> str:
 
 def roles(cfg: Config) -> tuple[str, str]:
     """How to call the training and the test stints in this run."""
-    return ("prácticas", "carrera") if cfg.data.train_sessions else ("entrenamiento", "prueba")
+    if cfg.data.train_sessions:
+        return "prácticas", "carrera"
+    if cfg.data.test_gp:
+        return "otras carreras", "carrera no vista"
+    return "entrenamiento", "prueba"
 
 
 def phase_counter(job: Job) -> str:
